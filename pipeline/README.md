@@ -57,7 +57,9 @@ kubectl logs -n ii400r87 -f job/agr-q35v1-controller
 | Loss on bad-prefix turns | included | user: follow the released code (`rewrite()` drops the loss flags) |
 | alpha/beta on SciWorld | raw 0-100 scores | released code does not rescale |
 | Tasks per iteration | the same tasks every iteration | released code (`range(1000)`, variations `1..task_iteration`) |
-| SFT max length | 2048 | user: stock XTuner config |
+| Dataset order | WebShop end to end first (`tasks: [webshop]`), then SciWorld | user |
+| Processes per GPU | 16 for search and revision, sharing one vLLM server | KV-cache arithmetic from measured lengths |
+| SFT max length | **not set yet** | stock XTuner is 2048, but measured revision rows are 4,297-19,651 tokens (median 9,896); the controller stops before SFT until chosen |
 | Precision | bf16 | user; Qwen3.5 is released in bf16 |
 | Global batch | 112 = 1 x 16 x 7 GPUs | XTuner per-GPU values on our 7 GPUs |
 | Trainer | ms-swift 4.5.3 | XTuner has no Qwen3.5 support |

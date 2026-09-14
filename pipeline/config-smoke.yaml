@@ -1,6 +1,7 @@
 # Tiny end-to-end check of the pipeline mechanics (all 3 iterations, every step, every image).
 # Same as config.yaml except the sizes marked SMOKE. Not a result; outputs go to /data/runs/smoke1.
 run: smoke1
+tasks: [webshop, sciworld]
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # SFT of the 9B model needs the real GPU count
@@ -48,6 +49,7 @@ search:
 revise:
   alpha: [0, 0, 0]             # SMOKE: keep every pair so every step has data
   beta: 0
+  workers_per_gpu: 16
 
 sft_data:
   caps:

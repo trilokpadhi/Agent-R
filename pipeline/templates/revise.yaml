@@ -32,16 +32,24 @@ spec:
               set -uo pipefail
               rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
 {{START_VLLM}}
-              mkdir -p "$WORKDIR" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
-              rm -rf out.partial
-              echo "REVISE_START $(date -Is) $TASK trees=$(ls "$INPUT_DIR" | wc -l) alpha=$ALPHA beta=$BETA model=$MODEL_DIR"
-              python3 "$CODE/path_collection.py" --input_dir "$INPUT_DIR" --output_dir out.partial \
-                --data_type centric --revise 1 >> "$LOG_DIR/$JOB_NAME.log" 2>&1
+              mkdir -p "$WORKDIR/out" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
+              TREES=$(ls "$INPUT_DIR" | wc -l)
+              echo "REVISE_START $(date -Is) $TASK trees=$TREES processes=$WORKERS alpha=$ALPHA beta=$BETA model=$MODEL_DIR"
+              # One path_collection.py per tree, $WORKERS at a time, all sharing this GPU's vLLM server.
+              # A tree's output moves into out/ only when it finishes, so a restart skips finished trees
+              # (path_collection.py appends to its JSONL, so partial output must never be reused).
+              ls "$INPUT_DIR" | xargs -P "$WORKERS" -n 1 bash -c '
+                t="$1"
+                [ -d "out/$t" ] && exit 0
+                rm -rf "partial/$t"
+                python3 "$CODE/path_collection.py" --input_dir "$INPUT_DIR/$t" --output_dir "partial/$t" \
+                  --data_type centric --revise 1 >> "$LOG_DIR/$JOB_NAME.$t.log" 2>&1 \
+                  && mkdir -p "partial/$t" && mv "partial/$t" "out/$t"' _
               RC=$?
               kill "$VLLM_PID" 2>/dev/null
-              [ "$RC" -eq 0 ] || { echo "REVISE_FAILED rc=$RC; see $LOG_DIR/$JOB_NAME.log"; tail -20 "$LOG_DIR/$JOB_NAME.log"; exit 1; }
-              mkdir -p out.partial && rm -rf out && mv out.partial out
-              echo "REVISE_DONE $(date -Is) rows=$(cat out/*.jsonl 2>/dev/null | wc -l)"
+              DONE=$(ls out | wc -l)
+              [ "$RC" -eq 0 ] && [ "$DONE" -eq "$TREES" ] || { echo "REVISE_FAILED rc=$RC trees_done=$DONE/$TREES; see $LOG_DIR/$JOB_NAME.*.log"; exit 1; }
+              echo "REVISE_DONE $(date -Is) trees=$DONE rows=$(cat out/*/*.jsonl 2>/dev/null | wc -l)"
           resources:
             limits: {nvidia.com/gpu: "1"}
           volumeMounts:

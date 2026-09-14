@@ -1,8 +1,9 @@
 # Agent-R reproduction: Qwen3.5-9B on WebShop + SciWorld, 3 iterations.
 # Every setting the pipeline uses lives here. Each value names its source.
-# A run = one git commit + this file; the controller refuses to resume a run from a different commit.
+# Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35v1                     # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+run: q35ws                     # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
@@ -36,7 +37,8 @@ inference:                     # shared by search, revision and eval
   enable_thinking: 0           # Agent-R's base model (Llama-3.1) has no thinking mode
   vllm_dtype: bfloat16
   vllm_max_model_len: 16384    # KV-cache sizing only; conversations are truncated at 8192 above
-  workers_per_gpu: 6           # measured in pilot A (2.6x faster per GPU than one in-process engine)
+  workers_per_gpu: 16          # search processes per GPU sharing one vLLM server. Pilot A used 6 with the
+                               # KV cache only 2-3% full; 16 x <=8192 tokens fits in the 405,504-token cache
 
 search:                        # mcts_collection.py, released code as-is: same tasks every iteration
   max_depth: 20                # paper
@@ -46,11 +48,14 @@ search:                        # mcts_collection.py, released code as-is: same t
   sciworld_task_iteration: 9   # 23 tasks x 9 variations ~= the paper's 200 SciWorld simulations
   seed_trees:                  # already-collected iteration-1 WebShop trees (same model, same settings)
     iter1:
-      webshop: /data/results/mcts-iter1-webshop/mcts_result/webshop/Qwen3.5-9B
+      webshop: /data/runs/q35v1/iter1/search-webshop/mcts_result/webshop/Qwen3.5-9B   # 300 trees
+      # SciWorld run later: /data/runs/q35v1/iter1/search-sciworld/mcts_result/sciworld/Qwen3.5-9B (207 trees)
 
 revise:                        # path_collection.py --data_type centric --revise 1 (README)
   alpha: [0.5, 0.7, 1.0]       # paper, per iteration; applied to raw scores as the code does (SciWorld 0-100)
   beta: 0.2                    # paper
+  workers_per_gpu: 16          # one path_collection.py per tree, 16 at a time per GPU; revision rows are
+                               # ~10k tokens (median), so 16 concurrent requests use ~40% of the KV cache
 
 sft_data:
   # Maintainer (issue #8): each iteration trains on revise_log + high_log entries; paper Table 1 sizes.
@@ -64,7 +69,9 @@ sft_data:
 sft:                           # authors' XTuner llama3_8b_instruct_full_alpaca_e3 (issue #8), mapped to ms-swift
   epochs: [3, 1, 1]            # paper
   continue_from_previous: true # user decision: iterations 2-3 fine-tune the previous checkpoint
-  max_length: 2048             # XTuner stock (user decision)
+  max_length: null             # MUST be chosen before SFT. Stock XTuner is 2048, but measured revision rows are
+                               # 4,297-19,651 tokens (median 9,896): 2048 cuts off every revision. The controller
+                               # stops before SFT while this is null; set it, commit, rerun deploy.sh.
   truncation_strategy: right   # XTuner truncates; ms-swift's default 'delete' would drop long samples
   learning_rate: 2.0e-5        # XTuner
   warmup_ratio: 0.03           # XTuner

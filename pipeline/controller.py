@@ -4,8 +4,8 @@
 Runs inside the parent Kubernetes Job. For each iteration it launches one child Job per step,
 waits for it, checks its output, and writes a .done marker:
 
-    search webshop -> search sciworld -> revise webshop -> revise sciworld
-    -> build SFT data -> SFT -> eval webshop + eval sciworld
+    search -> revise (path_collection) -> build SFT data -> SFT -> eval
+for each dataset listed in config `tasks` (e.g. [webshop] to finish one dataset end to end).
 
 Rerunning the parent Job resumes: steps with a .done marker are skipped, child Jobs that already
 succeeded are kept, failed ones are recreated. Standard library only (runs in alpine/k8s).
@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
-TASKS = ["webshop", "sciworld"]
 SCIWORLD_TASK_NUMS = 23  # mcts_collection.py task_nums list (maintainers' split)
 POLL_SECONDS = 60
 
@@ -66,6 +65,7 @@ class Pipeline:
         self.ns = cfg["namespace"]
         self.root = Path(cfg["run_root"]) / cfg["run"]
         self.logs = self.root / "logs"
+        self.tasks = cfg["tasks"]  # e.g. [webshop]: one dataset end to end
 
     # ---------- Kubernetes ----------
     def job_state(self, name):
@@ -146,7 +146,7 @@ class Pipeline:
             "LOG_DIR": self.logs,
         }
 
-    def inference_env(self, job_name, task, model_dir, workdir, model_type="Raw"):
+    def inference_env(self, job_name, task, model_dir, workdir, model_type="Raw", workers=None):
         """Env block shared by search, revise and eval containers (12-space YAML indent)."""
         c, inf, s = self.cfg, self.cfg["inference"], self.cfg["search"]
         env = {
@@ -169,7 +169,7 @@ class Pipeline:
             "VLLM_DTYPE": inf["vllm_dtype"],
             "VLLM_MAX_MODEL_LEN": inf["vllm_max_model_len"],
             "VLLM_API_BASE": "http://127.0.0.1:8000/v1",
-            "WORKERS": inf["workers_per_gpu"],
+            "WORKERS": workers or inf["workers_per_gpu"],
             "PYTHONPATH": f"{self.code}:{c['environments'][task]['agentenv']}:/data/envs/policy-site",
             "PYTHONUNBUFFERED": "1",
             "HF_HOME": "/data/models/huggingface",
@@ -240,6 +240,11 @@ class Pipeline:
         if task == "webshop":
             shards, expected = self.webshop_shards()
             extra = ""
+            have = len(list(trees.glob("search_results_*.json")))
+            if have >= expected:
+                self.mark_done(step_dir, {"trees": have, "model_dir": model_dir, "seeded_from": seed})
+                log(f"iter{iteration} search {task}: all {have} trees already present, no jobs needed")
+                return
         else:
             shards, expected = self.sciworld_shards(), None
             extra = f"--task_iteration {self.cfg['search']['sciworld_task_iteration']}"
@@ -280,11 +285,12 @@ class Pipeline:
             input_dir = step_dir / "input" / f"shard{k}"
             if self.job_state(name) != "succeeded":
                 shutil.rmtree(input_dir, ignore_errors=True)
-                input_dir.mkdir(parents=True)
-                for f in chunk:
-                    (input_dir / f.name).symlink_to(f)
+                for f in chunk:  # one folder per tree, so one path_collection process per tree
+                    (input_dir / f.stem).mkdir(parents=True)
+                    (input_dir / f.stem / f.name).symlink_to(f)
             values = self.base_values(name) | {
-                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / f"shard{k}"),
+                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / f"shard{k}",
+                                                 workers=self.cfg["revise"]["workers_per_gpu"]),
                 "START_VLLM": self.START_VLLM,
                 "ALPHA": alpha,
                 "BETA": beta,
@@ -293,7 +299,7 @@ class Pipeline:
             jobs.append((name, self.render("revise.yaml", values)))
         log(f"iter{iteration} revise {task}: {len(files)} trees over {len(jobs)} shards, alpha={alpha} beta={beta}")
         self.run_jobs(jobs)
-        rows = sum(sum(1 for _ in open(p)) for p in step_dir.glob("shard*/out/*_centric.jsonl"))
+        rows = sum(sum(1 for _ in open(p)) for p in step_dir.glob("shard*/out/*/*_centric.jsonl"))
         self.mark_done(step_dir, {"rows": rows, "alpha": alpha, "beta": beta, "model_dir": model_dir})
         log(f"iter{iteration} revise {task}: {rows} rows")
 
@@ -319,9 +325,9 @@ class Pipeline:
         cfg = self.cfg["sft_data"]
         rng = random.Random(self.cfg["seed"] * 1000 + iteration)
         agent, stats = [], {}
-        for task in TASKS:
+        for task in self.tasks:
             revise, good, seen, invalid = [], [], set(), 0
-            for path in sorted((self.root / f"iter{iteration}" / f"revise-{task}").glob("shard*/out/*_centric.jsonl")):
+            for path in sorted((self.root / f"iter{iteration}" / f"revise-{task}").glob("shard*/out/*/*_centric.jsonl")):
                 for line in open(path):
                     row = json.loads(line)
                     conv = self.clean_conversation(row["revise_log"])
@@ -379,6 +385,10 @@ class Pipeline:
             log(f"iter{iteration} sft: done, checkpoint {ckpt}")
             return ckpt
         s, gpus = self.cfg["sft"], self.cfg["gpus"]
+        if not s.get("max_length"):
+            raise RuntimeError("sft.max_length is not set: revision rows measured 4,297-19,651 tokens "
+                               "(median 9,896), so 2048 would cut off every revision. Choose a value, "
+                               "commit, and rerun deploy.sh; finished steps are kept.")
         if s["global_batch"] % (gpus * s["per_device_batch"]):
             raise RuntimeError("sft.global_batch must be divisible by gpus x per_device_batch")
         grad_accum = s["global_batch"] // (gpus * s["per_device_batch"])
@@ -413,7 +423,7 @@ class Pipeline:
         e = self.cfg["eval"]
         model_type = f"agentr-iter{iteration}"
         jobs = []
-        for task in TASKS:
+        for task in self.tasks:
             name = self.job_name(iteration, f"eval-{task[:2]}")
             limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
             values = self.base_values(name) | {
@@ -427,7 +437,7 @@ class Pipeline:
         log(f"iter{iteration} eval: {model_dir}")
         self.run_jobs(jobs)
         summary = {"model_dir": model_dir}
-        for task in TASKS:
+        for task in self.tasks:
             results = list((step_dir / task / "test_result" / task / f"{self.cfg['model']['name']}_{model_type}")
                            .glob("search_results_*.json"))
             scores = [json.load(open(p))["env_score"] for p in results]
@@ -450,9 +460,9 @@ class Pipeline:
         model_dir = self.cfg["model"]["base_dir"]
         for it in range(1, self.cfg["iterations"] + 1):
             log(f"===== iteration {it}: model {model_dir}")
-            for task in TASKS:
+            for task in self.tasks:
                 self.step_search(it, task, model_dir)
-            for task in TASKS:
+            for task in self.tasks:
                 self.step_revise(it, task, model_dir)
             data = self.step_sft_data(it)
             start = model_dir if self.cfg["sft"]["continue_from_previous"] else self.cfg["model"]["base_dir"]
