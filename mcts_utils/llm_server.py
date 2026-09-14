@@ -25,20 +25,71 @@ from mcts_utils.sciworld.eval_utils_sw import findValidActionNew
 
 class FuncCallOffline:
     def __init__(self, model_name=None):
-        from vllm import LLM, SamplingParams
         self.model_name = model_name
-        self.llm = LLM(model=os.environ["MODEL_DIR"], dtype="half")
+        # VLLM_API_BASE (e.g. http://127.0.0.1:8000/v1) sends generation to a shared vLLM
+        # OpenAI-compatible server, so many worker processes per GPU share one batched engine.
+        # Leave it unset to keep the original in-process engine.
+        self.api_base = os.environ.get("VLLM_API_BASE")
+        if self.api_base:
+            from openai import OpenAI
+
+            self.client = OpenAI(base_url=self.api_base, api_key=os.environ.get("VLLM_API_KEY", "EMPTY"))
+            self.served_model = os.environ.get("VLLM_SERVED_MODEL", os.environ["MODEL_DIR"])
+        else:
+            from vllm import LLM
+
+            # Defaults keep the original Llama-3.1 behaviour; Qwen/Gemma set these env vars
+            # (e.g. VLLM_DTYPE=bfloat16, STOP_TOKENS="", ENABLE_THINKING=0).
+            llm_kwargs = {"model": os.environ["MODEL_DIR"], "dtype": os.environ.get("VLLM_DTYPE", "half")}
+            if "VLLM_MAX_MODEL_LEN" in os.environ:
+                llm_kwargs["max_model_len"] = int(os.environ["VLLM_MAX_MODEL_LEN"])
+            if "VLLM_GPU_MEMORY_UTILIZATION" in os.environ:
+                llm_kwargs["gpu_memory_utilization"] = float(os.environ["VLLM_GPU_MEMORY_UTILIZATION"])
+            self.llm = LLM(**llm_kwargs)
         if "TEMP" in os.environ:
             print(f'当前 TEMP 值: {os.environ["TEMP"]}')
         else:
             os.environ["TEMP"] = "1"
             print("TEMP 不存在，已设置为 1")
-        self.sampling_params = SamplingParams(temperature=float(os.environ["TEMP"]), max_tokens=500, stop=["<|eot_id|>"])
+        self.stop = [s for s in os.environ.get("STOP_TOKENS", "<|eot_id|>").split(",") if s] or None
+        self.temperature = float(os.environ["TEMP"])
+        self.max_new_tokens = int(os.environ.get("MAX_NEW_TOKENS", "500"))
+        if not self.api_base:
+            from vllm import SamplingParams
+
+            self.sampling_params = SamplingParams(
+                temperature=self.temperature,
+                max_tokens=self.max_new_tokens,
+                stop=self.stop,
+            )
+        self.chat_kwargs = {}
+        if "ENABLE_THINKING" in os.environ:
+            enable_thinking = os.environ["ENABLE_THINKING"].lower() in ("1", "true", "yes")
+            self.chat_kwargs["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         tokenizer = AutoTokenizer.from_pretrained(os.environ["MODEL_DIR"])
         self.encoding = tokenizer
 
     def llm_func(self, messages, model_name):
-        outputs = self.llm.chat(messages, sampling_params=self.sampling_params)
+        if self.api_base:
+            import time
+
+            last_error = None
+            for attempt in range(5):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.served_model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=self.max_new_tokens,
+                        stop=self.stop,
+                        extra_body=self.chat_kwargs or None,
+                    )
+                    return (response.choices[0].message.content or "").strip()
+                except Exception as e:  # transient server/queue errors
+                    last_error = e
+                    time.sleep(2 * (attempt + 1))
+            raise RuntimeError(f"vLLM server call failed after retries: {last_error}")
+        outputs = self.llm.chat(messages, sampling_params=self.sampling_params, **self.chat_kwargs)
         text = outputs[0].outputs[0].text.strip()
         return text
     

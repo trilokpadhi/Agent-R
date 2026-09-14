@@ -1,0 +1,39 @@
+# Lets the controller Job create, watch and delete its child Jobs in this namespace only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentr-pipeline
+  namespace: ii400r87
+  labels: {project: agent-r}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentr-pipeline
+  namespace: ii400r87
+  labels: {project: agent-r}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentr-pipeline
+  namespace: ii400r87
+  labels: {project: agent-r}
+subjects:
+  - kind: ServiceAccount
+    name: agentr-pipeline
+    namespace: ii400r87
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentr-pipeline

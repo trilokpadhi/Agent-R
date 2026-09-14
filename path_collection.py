@@ -131,7 +131,7 @@ def pair_leaf_paths(leaf_paths):
         (leaf_paths[i], leaf_paths[j])
         for i in range(len(leaf_paths))
         for j in range(len(leaf_paths))
-        if i != j and node_avg_value(leaf_paths[i][-1]) - node_avg_value(leaf_paths[j][-1]) > os.environ["BETA"]
+        if i != j and node_avg_value(leaf_paths[i][-1]) - node_avg_value(leaf_paths[j][-1]) > float(os.environ["BETA"])
     ]
     random.shuffle(paired_paths)
     return paired_paths
@@ -199,7 +199,7 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
     # Handle "good" data type
     if data_type == 'good':
         for high_path in sorted_leaf_paths:
-            if float(high_path[-1].value) <= os.environ["ALPHA"]:
+            if float(high_path[-1].value) <= float(os.environ["ALPHA"]):
                 continue
             revise_log = conversation_generation_good(high_path)
             output_entry = {
@@ -216,7 +216,7 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
 
     for high_path, low_path in tqdm(paired_paths, desc="Processing pairs"):
         k_ind += 1
-        if float(high_path[-1].value) <= os.environ["ALPHA"]:
+        if float(high_path[-1].value) <= float(os.environ["ALPHA"]):
             continue
 
         # Generate conversation logs

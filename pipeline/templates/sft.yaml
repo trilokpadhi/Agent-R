@@ -1,0 +1,83 @@
+# Step: full-parameter SFT with ms-swift on all pipeline GPUs.
+# Hyperparameters come from pipeline/config.yaml (authors' XTuner recipe); every ms-swift default
+# that differs from that recipe is set explicitly below.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: sft}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 259200
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: sft}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{NODE_KEY}}: {{NODE_VALUE}}
+      containers:
+        - name: sft
+          image: {{IMAGE_SFT}}
+          env:
+            - {name: NPROC_PER_NODE, value: "{{GPUS}}"}
+            - {name: HF_HOME, value: /data/models/huggingface}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+            - {name: OUTPUT_DIR, value: "{{OUTPUT_DIR}}"}
+            - {name: LOG_DIR, value: "{{LOG_DIR}}"}
+            - {name: JOB_NAME, value: "{{JOB_NAME}}"}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+              python3 -c "import torch; assert torch.cuda.device_count() == {{GPUS}}, torch.cuda.device_count(); print('cuda ok', torch.cuda.device_count())" || exit 1
+              rm -rf "$OUTPUT_DIR" && mkdir -p "$OUTPUT_DIR"
+              echo "SFT_START $(date -Is) model={{MODEL_DIR}} data={{DATA_PATH}} epochs={{EPOCHS}} per_device={{PER_DEVICE_BATCH}} accumulation={{GRAD_ACCUM}}"
+              swift sft \
+                --model "{{MODEL_DIR}}" \
+                --train_type full \
+                --dataset "{{DATA_PATH}}" \
+                --torch_dtype {{DTYPE}} \
+                --max_length {{MAX_LENGTH}} \
+                --truncation_strategy {{TRUNCATION}} \
+                --packing {{PACKING}} \
+                --loss_scale {{LOSS_SCALE}} \
+                --num_train_epochs {{EPOCHS}} \
+                --per_device_train_batch_size {{PER_DEVICE_BATCH}} \
+                --gradient_accumulation_steps {{GRAD_ACCUM}} \
+                --learning_rate {{LR}} \
+                --lr_scheduler_type cosine \
+                --warmup_ratio {{WARMUP}} \
+                --weight_decay {{WEIGHT_DECAY}} \
+                --max_grad_norm {{MAX_GRAD_NORM}} \
+                --adam_beta1 {{ADAM_BETA1}} \
+                --adam_beta2 {{ADAM_BETA2}} \
+                --deepspeed {{DEEPSPEED}} \
+                --gradient_checkpointing true \
+                --attn_impl flash_attn \
+                --split_dataset_ratio 0 \
+                --save_strategy epoch \
+                --save_only_model true \
+                --save_total_limit 1 \
+                --logging_steps 5 \
+                --dataset_num_proc 8 \
+                --seed {{SEED}} \
+                --report_to tensorboard \
+                --add_version false \
+                --output_dir "$OUTPUT_DIR" 2>&1 | tee "$LOG_DIR/$JOB_NAME.log"
+              RC=${PIPESTATUS[0]}
+              [ "$RC" -eq 0 ] || { echo "SFT_FAILED rc=$RC"; exit 1; }
+              echo "SFT_DONE $(date -Is)"; ls "$OUTPUT_DIR"
+          resources:
+            limits: {nvidia.com/gpu: "{{GPUS}}"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 64Gi}

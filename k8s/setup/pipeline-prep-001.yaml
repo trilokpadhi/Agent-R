@@ -1,0 +1,85 @@
+# CPU-only Job (no GPU): groundwork for the one-Job Agent-R pipeline.
+#  1. Download ShareGPT_Vicuna_unfiltered (the paper's general data) to /data/datasets.
+#  2. Check whether the vLLM image we already use can also run full SFT of Qwen3.5-9B
+#     (transformers model class, accelerate/deepspeed, linear-attention kernels), so no new
+#     training image is needed.
+# Apply: kubectl apply -n ii400r87 -f k8s/pipeline-prep-001.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pipeline-prep-001
+  labels:
+    project: agent-r
+    stage: pipeline-prep
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: pipeline-prep
+    spec:
+      restartPolicy: Never
+      # CPU-only, but on the H100 node where this 9.4 GB image is already cached.
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      containers:
+        - name: prep
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              mkdir -p /data/datasets/sharegpt /data/logs
+
+              echo "== 1. ShareGPT_Vicuna_unfiltered"
+              python3 - <<'PY'
+              from huggingface_hub import hf_hub_download
+              import json, os
+              p = hf_hub_download(
+                  repo_id="anon8231489123/ShareGPT_Vicuna_unfiltered",
+                  filename="ShareGPT_V3_unfiltered_cleaned_split.json",
+                  repo_type="dataset",
+                  local_dir="/data/datasets/sharegpt",
+              )
+              data = json.load(open(p))
+              print("path:", p, "size_MB:", os.path.getsize(p) // 2**20, "conversations:", len(data))
+              print("first keys:", list(data[0].keys()), "first roles:", [m["from"] for m in data[0]["conversations"][:4]])
+              PY
+
+              echo "== 2. can this image train Qwen3.5-9B?"
+              python3 - <<'PY'
+              import importlib, os
+              import torch, transformers
+              print("torch", torch.__version__, "| transformers", transformers.__version__)
+              for mod in ["accelerate", "deepspeed", "peft", "trl", "fla", "causal_conv1d", "flash_attn", "datasets"]:
+                  try:
+                      m = importlib.import_module(mod)
+                      print(f"  {mod}: {getattr(m, '__version__', 'present')}")
+                  except Exception as e:
+                      print(f"  {mod}: MISSING ({type(e).__name__})")
+              from transformers import AutoConfig, AutoModelForCausalLM
+              cfg = AutoConfig.from_pretrained(os.environ["MODEL_DIR"])
+              print("config:", type(cfg).__name__, "model_type:", cfg.model_type)
+              with torch.device("meta"):
+                  model = AutoModelForCausalLM.from_config(cfg)
+              print("AutoModelForCausalLM ->", type(model).__name__,
+                    "| params (B):", round(sum(p.numel() for p in model.parameters()) / 1e9, 2))
+              layer_types = sorted({type(m).__name__ for m in model.modules() if "DecoderLayer" in type(m).__name__})
+              print("decoder layer classes (FSDP wrap):", layer_types)
+              PY
+              echo PIPELINE_PREP_DONE
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

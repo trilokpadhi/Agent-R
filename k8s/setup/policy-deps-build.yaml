@@ -1,0 +1,121 @@
+# CPU-only Job: prepare Agent-R's policy-side Python dependencies for the vLLM image on
+# the PVC, without changing any package the image ships (torch, vLLM, transformers,
+# pydantic, ... stay as built).
+#   /data/envs/policy-site       fschat 0.2.36 plus any module missing from the image,
+#                                installed with --no-deps into a --target directory
+#   /data/src/AgentGym/agentenv  used from source via PYTHONPATH; its declared deps
+#                                (deepspeed, trl, wandb, ...) are not needed by Agent-R
+# Policy Jobs then use:
+#   PYTHONPATH=/data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+# The import checks refuse to install a top-level module the image already has, so a
+# missing *submodule* (API mismatch) fails loudly instead of shadowing an image package.
+# Apply: kubectl apply -n ii400r87 -f k8s/policy-deps-build.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: policy-deps-build-001
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: deps
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: TARGET
+              value: /data/envs/policy-site
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              mkdir -p /data/logs "$TARGET"
+              exec > >(tee -a /data/logs/policy-deps-build-001.log) 2>&1
+              echo "START $(date -Is)"
+              python3 --version
+              if python3 -m pip --version; then
+                export PIP="python3 -m pip"
+              elif command -v uv; then
+                export PIP="uv pip"
+              else
+                echo "NO_PIP_OR_UV_IN_IMAGE"; exit 1
+              fi
+              echo "PIP=$PIP"
+              $PIP install --no-deps --target "$TARGET" "fschat==0.2.36"
+
+              cat > /tmp/resolve_imports.py <<'EOF'
+              import os
+              import re
+              import subprocess
+              import sys
+
+              TARGET = os.environ["TARGET"]
+              PIP = os.environ["PIP"].split()
+              env = dict(os.environ)
+              env["PYTHONPATH"] = ":".join(["/data/src/Agent-R", "/data/src/AgentGym/agentenv", TARGET])
+              env.update({"TASK": "webshop", "MAX_DEPTH": "1", "ITERA": "1", "N_GEN": "1",
+                          "MODEL_TYPE": "check", "MAX_TOKEN_LENGTH": "7000"})
+              PIP_NAMES = {"yaml": "PyYAML", "sklearn": "scikit-learn", "PIL": "Pillow",
+                           "cv2": "opencv-python-headless", "bs4": "beautifulsoup4",
+                           "dateutil": "python-dateutil"}
+              CHECKS = [
+                  "from fastchat.model.model_adapter import get_conversation_template; print(get_conversation_template('gpt-4').name)",
+                  "from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient",
+                  "import tiktoken, mcts_utils.llm_server",
+                  "import mcts_utils.webshop.mcts_ws",
+                  "import mcts_utils.sciworld.mcts_sci",
+              ]
+
+
+              def run(code):
+                  return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                                        text=True, cwd="/data/src/Agent-R")
+
+
+              installed = []
+              for stmt in CHECKS:
+                  for _ in range(15):
+                      r = run(stmt)
+                      if r.returncode == 0:
+                          print(f"OK: {stmt}" + (f" -> {r.stdout.strip()}" if r.stdout.strip() else ""))
+                          break
+                      m = re.search(r"No module named '([^']+)'", r.stderr)
+                      if not m:
+                          print(f"FAILED (not a missing module): {stmt}\n{r.stderr[-4000:]}")
+                          sys.exit(1)
+                      mod = m.group(1).split(".")[0]
+                      if run(f"import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({mod!r}) else 1)").returncode == 0:
+                          print(f"FAILED: top-level module {mod} exists but a submodule is missing (API mismatch)\n{r.stderr[-4000:]}")
+                          sys.exit(1)
+                      pkg = PIP_NAMES.get(mod, mod)
+                      if pkg in installed:
+                          print(f"FAILED: {mod} still missing after installing {pkg}\n{r.stderr[-2000:]}")
+                          sys.exit(1)
+                      print(f"installing missing module {mod} as {pkg} (--no-deps)")
+                      subprocess.run(PIP + ["install", "--no-deps", "--target", TARGET, pkg], check=True)
+                      installed.append(pkg)
+                  else:
+                      sys.exit(f"FAILED: too many missing modules for {stmt}")
+              print("INSTALLED_INTO_TARGET:", installed)
+              print("IMPORT_CHECKS_PASSED")
+              EOF
+              python3 /tmp/resolve_imports.py
+              ls "$TARGET"
+              echo "END $(date -Is)"
+              echo POLICY_DEPS_BUILD_DONE
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

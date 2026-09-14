@@ -1,0 +1,47 @@
+# Step: evaluate a checkpoint on one environment's test set (eval.py), one GPU.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: eval}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 172800
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: eval}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{NODE_KEY}}: {{NODE_VALUE}}
+      initContainers:
+{{SIDECAR}}
+      containers:
+        - name: policy
+          image: {{IMAGE_VLLM}}
+          env:
+{{COMMON_ENV}}
+            - {name: MAX_STEPS, value: "{{MAX_STEPS}}"}
+{{TASK_LIMIT_ENV}}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+{{START_VLLM}}
+              mkdir -p "$WORKDIR" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
+              echo "EVAL_START $(date -Is) $TASK model=$MODEL_DIR type=$MODEL_TYPE"
+              python3 "$CODE/eval.py" --env_server_base http://127.0.0.1:36001 \
+                --model_name "$MODEL_NAME" --max_steps "$MAX_STEPS" >> "$LOG_DIR/$JOB_NAME.log" 2>&1
+              RC=$?
+              kill "$VLLM_PID" 2>/dev/null
+              [ "$RC" -eq 0 ] || { echo "EVAL_FAILED rc=$RC; see $LOG_DIR/$JOB_NAME.log"; tail -20 "$LOG_DIR/$JOB_NAME.log"; exit 1; }
+              echo "EVAL_DONE $(date -Is)"
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}

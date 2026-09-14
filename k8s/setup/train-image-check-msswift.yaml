@@ -1,0 +1,70 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-image-check-msswift
+  labels:
+    project: agent-r
+    stage: train-image-check
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: train-image-check
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      containers:
+      - name: check
+        image: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda13.0.3-py312-torch2.13.0-vllm0.28.0-modelscope1.40.0-swift4.5.3
+        env:
+        - name: MODEL_DIR
+          value: "/data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+        command:
+        - bash
+        - "-c"
+        args:
+        - |
+          echo "== image facts"
+          python3 --version
+          ls /etc/ld.so.conf.d/ 2>/dev/null | tr "\n" " "; echo
+          python3 - <<'PY'
+          import importlib, os
+          import torch
+          print("torch", torch.__version__, "| built for CUDA", torch.version.cuda)
+          for mod in ["transformers", "deepspeed", "accelerate", "datasets", "peft", "trl",
+                      "flash_attn", "fla", "causal_conv1d", "liger_kernel", "llamafactory", "swift"]:
+              try:
+                  m = importlib.import_module(mod)
+                  print(f"  {mod}: {getattr(m, '__version__', 'present')}")
+              except Exception as e:
+                  print(f"  {mod}: MISSING ({type(e).__name__})")
+
+          print("== can it build Qwen3.5-9B from our checkpoint?")
+          from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+          cfg = AutoConfig.from_pretrained(os.environ["MODEL_DIR"])
+          print("config:", type(cfg).__name__, "model_type:", cfg.model_type)
+          with torch.device("meta"):
+              model = AutoModelForCausalLM.from_config(cfg)
+          print("AutoModelForCausalLM ->", type(model).__name__,
+                "| params (B):", round(sum(p.numel() for p in model.parameters()) / 1e9, 2))
+          print("decoder layer classes:", sorted({type(m).__name__ for m in model.modules() if "DecoderLayer" in type(m).__name__}))
+
+          print("== tokenizer, non-thinking chat prompt")
+          tok = AutoTokenizer.from_pretrained(os.environ["MODEL_DIR"])
+          msgs = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}, {"role": "user", "content": "v"}]
+          print(repr(tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)))
+          print("TRAIN_IMAGE_CHECK_PASSED")
+          PY
+        volumeMounts:
+        - name: data
+          mountPath: "/data"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: tpadhi1

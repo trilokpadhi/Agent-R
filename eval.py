@@ -61,22 +61,31 @@ def main(Task: str, model_name: str, env_server_base: str, max_steps: int):
     # Initialize environment
     env = initialize_environment(Task, env_server_base)
 
-    # Load task indices
-    temp = read_json(f"test_id/{Task}_test.json")
+    # Load task indices (test_id/ is not shipped; the ids live under mcts_utils/<task>/)
+    test_file = f"test_id/{Task}_test.json"
+    if not os.path.exists(test_file):
+        test_file = f"mcts_utils/{Task}/{Task}_test.json"
+    temp = read_json(test_file)
     task_inds = [ind["item_id"].replace(f"{Task}_", "") for ind in temp]
+    if "TASK_LIMIT" in os.environ:
+        task_inds = task_inds[:int(os.environ["TASK_LIMIT"])]
+
+    # Load the model once; constructing FuncCallOffline per task re-creates the vLLM engine
+    calling = FuncCallOffline(model_name=model_name)
 
     # Process each task index
     for idx in task_inds:
-        dir_path = f"test_result/{Task}/{model_name}"
+        # Must match the output directory used by perform_test
+        dir_path = f"test_result/{Task}/{model_name}_{os.environ['MODEL_TYPE']}"
         file_path = f"{dir_path}/search_results_{idx}.json"
-        
+
         if os.path.exists(file_path):
             print(f"{file_path} exists. Skipping.")
             continue
 
         env.reset(int(idx))
         conv = setup_conversation(env)
-        perform_test(FuncCallOffline(model_name=model_name), env, conv, model_name, idx, max_steps)
+        perform_test(calling, env, conv, model_name, idx, max_steps)
 
 if __name__ == "__main__":
     # Argument parsing

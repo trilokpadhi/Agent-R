@@ -1,0 +1,50 @@
+# CPU-only Job: download Qwen/Qwen3.5-9B (~19.3 GB) into the PVC HF cache.
+# No GPU is requested, so the download does not hold an H100.
+# Apply: kubectl apply -n ii400r87 -f k8s/qwen35-9b-download.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-9b-download-001
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: python:3.11-slim
+          env:
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: MODEL_ID
+              value: Qwen/Qwen3.5-9B
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir --quiet "huggingface_hub==0.34.4"
+              python - <<'EOF'
+              import os
+              from huggingface_hub import snapshot_download
+              path = snapshot_download(repo_id=os.environ["MODEL_ID"])
+              print("MODEL_PATH:", path)
+              for name in sorted(os.listdir(path)):
+                  print("  ", name)
+              EOF
+              du -sh "$HF_HOME/hub"
+              df -h /data
+              echo QWEN_DOWNLOAD_DONE
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

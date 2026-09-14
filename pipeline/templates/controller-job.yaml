@@ -1,0 +1,36 @@
+# The ONE Job you submit. It runs pipeline/controller.py from the committed code on the PVC,
+# which launches and waits for every step's child Job. No GPU of its own.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agr-{{RUN}}-controller
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: controller, git-sha: "{{SHA}}"}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 2592000      # 30 days
+  ttlSecondsAfterFinished: 1209600
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: controller}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: agentr-pipeline
+      containers:
+        - name: controller
+          image: {{IMAGE_CONTROLLER}}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -o pipefail
+              mkdir -p /data/runs/{{RUN}}/logs
+              python3 -u {{CODE}}/pipeline/controller.py \
+                --config {{CODE}}/{{CONFIG}} --code-dir {{CODE}} --sha {{SHA}} \
+                2>&1 | tee -a /data/runs/{{RUN}}/logs/controller.log
+          resources:
+            requests: {cpu: "1", memory: 4Gi}
+            limits: {memory: 16Gi}      # loading ShareGPT (641 MB JSON) needs a few GB
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}

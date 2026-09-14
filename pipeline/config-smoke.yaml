@@ -1,0 +1,79 @@
+# Tiny end-to-end check of the pipeline mechanics (all 3 iterations, every step, every image).
+# Same as config.yaml except the sizes marked SMOKE. Not a result; outputs go to /data/runs/smoke1.
+run: smoke1
+namespace: ii400r87
+pvc: tpadhi1
+gpus: 7                        # SFT of the 9B model needs the real GPU count
+iterations: 3
+seed: 42
+run_root: /data/runs
+
+images:
+  vllm: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+  sft: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope@sha256:cb8aadb783de32cd9df894b0d44b96161b31bed78d1eeafd59e9563a518743c3
+  env_server: condaforge/miniforge3:24.3.0-0
+  controller: alpine/k8s@sha256:5efac3ed9955c8747296d520539cded681f4ef5dbb73fb591141df282b61cc35
+
+node_selector_key: nvidia.com/gpu.product
+node_selector_value: NVIDIA-H100-80GB-HBM3
+
+model:
+  name: Qwen3.5-9B
+  base_dir: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+
+environments:
+  webshop:
+    agentenv: /data/src/AgentGym/agentenv
+  sciworld:
+    agentenv: /data/src/AgentGym-agentr/agentenv
+
+inference:
+  temp: 1
+  max_new_tokens: 500
+  max_token_length: 8192
+  enable_thinking: 0
+  vllm_dtype: bfloat16
+  vllm_max_model_len: 16384
+  workers_per_gpu: 6
+
+search:
+  max_depth: 4                 # SMOKE
+  itera: 2                     # SMOKE
+  n_gen: 2                     # SMOKE
+  webshop_tasks: 2             # SMOKE
+  sciworld_task_iteration: 1   # SMOKE
+  sciworld_tasks: 2            # SMOKE (first 2 of the 23 task_nums)
+  seed_trees: {}
+
+revise:
+  alpha: [0, 0, 0]             # SMOKE: keep every pair so every step has data
+  beta: 0
+
+sft_data:
+  caps:
+    webshop: {revise: 5500, good: 600}
+    sciworld: {revise: 8000, good: 2500}
+  general_path: /data/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json
+  general_fraction: 0.9        # SMOKE: pad the tiny agent set with general data so SFT has real steps
+
+sft:
+  epochs: [1, 1, 1]            # SMOKE
+  continue_from_previous: true
+  max_length: 2048
+  truncation_strategy: right
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  dtype: bfloat16
+  global_batch: 56             # SMOKE: 8 per GPU x 1 x 7, to measure memory at the batch we want
+  per_device_batch: 8          # SMOKE
+  deepspeed: zero2
+  packing: false
+  loss_scale: default
+
+eval:
+  max_steps: 5                 # SMOKE
+  task_limit: 2                # SMOKE

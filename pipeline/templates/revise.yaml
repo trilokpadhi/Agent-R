@@ -1,0 +1,51 @@
+# Step: build revision data (path_collection.py --data_type centric --revise 1), one GPU.
+# The current model (served by vLLM) finds the first wrong step in each bad path.
+# Output goes to a temporary directory and is moved into place only on success, because
+# path_collection.py appends to its JSONL and a rerun would otherwise duplicate rows.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: revise}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 172800
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: revise}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{NODE_KEY}}: {{NODE_VALUE}}
+      containers:
+        - name: policy
+          image: {{IMAGE_VLLM}}
+          env:
+{{COMMON_ENV}}
+            - {name: ALPHA, value: "{{ALPHA}}"}
+            - {name: BETA, value: "{{BETA}}"}
+            - {name: INPUT_DIR, value: "{{INPUT_DIR}}"}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+{{START_VLLM}}
+              mkdir -p "$WORKDIR" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
+              rm -rf out.partial
+              echo "REVISE_START $(date -Is) $TASK trees=$(ls "$INPUT_DIR" | wc -l) alpha=$ALPHA beta=$BETA model=$MODEL_DIR"
+              python3 "$CODE/path_collection.py" --input_dir "$INPUT_DIR" --output_dir out.partial \
+                --data_type centric --revise 1 >> "$LOG_DIR/$JOB_NAME.log" 2>&1
+              RC=$?
+              kill "$VLLM_PID" 2>/dev/null
+              [ "$RC" -eq 0 ] || { echo "REVISE_FAILED rc=$RC; see $LOG_DIR/$JOB_NAME.log"; tail -20 "$LOG_DIR/$JOB_NAME.log"; exit 1; }
+              mkdir -p out.partial && rm -rf out && mv out.partial out
+              echo "REVISE_DONE $(date -Is) rows=$(cat out/*.jsonl 2>/dev/null | wc -l)"
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}

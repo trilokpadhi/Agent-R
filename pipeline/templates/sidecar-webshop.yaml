@@ -1,0 +1,19 @@
+        - name: env-server
+          image: {{IMAGE_ENV_SERVER}}
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command: ["/data/envs/agentenv-webshop/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data

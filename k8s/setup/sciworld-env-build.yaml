@@ -1,0 +1,86 @@
+# CPU-only Job: build the AgentGym SciWorld server environment onto the PVC, then
+# start the server once and check that it answers.
+#   conda env -> /data/envs/agentenv-sciworld  (Python 3.8, OpenJDK 11)
+#   log       -> /data/logs/sciworld-env-build-002.log
+# The `sciworld` command defaults to port 8000; always pass --port 36001.
+# Apply: kubectl apply -n ii400r87 -f k8s/sciworld-env-build.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sciworld-env-build-002
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: build
+          image: condaforge/miniforge3:24.3.0-0
+          env:
+            - name: ENV_PREFIX
+              value: /data/envs/agentenv-sciworld
+            - name: SRC
+              value: /data/src/AgentGym/agentenv-sciworld
+            - name: PIP_NO_CACHE_DIR
+              value: "1"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              mkdir -p /data/envs /data/logs
+              exec > >(tee -a /data/logs/sciworld-env-build-002.log) 2>&1
+              echo "START $(date -Is) on $(hostname)"
+
+              if [ ! -x "$ENV_PREFIX/bin/python" ]; then
+                conda create -y -p "$ENV_PREFIX" --override-channels -c conda-forge python=3.8 openjdk=11
+              fi
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate "$ENV_PREFIX"
+              python --version
+              java -version
+
+              pip install -e "$SRC"
+              command -v sciworld
+              # Run 001 failed here: piping `pip show` into a command that closed the pipe
+              # early made pip exit non-zero, and pipefail + set -e stopped the build.
+              python -c "import importlib.metadata as m, scienceworld; print('scienceworld import ok', m.version('scienceworld'))"
+
+              echo "== server self-test"
+              sciworld --host 127.0.0.1 --port 36001 > /data/logs/sciworld-server-selftest-002.log 2>&1 &
+              SERVER_PID=$!
+              python - <<'EOF'
+              import json, sys, time, urllib.request
+              base = "http://127.0.0.1:36001"
+              def call(method, path, timeout=600):
+                  req = urllib.request.Request(base + path, data=b"" if method == "POST" else None, method=method)
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      return r.read().decode()
+              for _ in range(120):
+                  try:
+                      print("GET / ->", call("GET", "/", timeout=5)); break
+                  except Exception:
+                      time.sleep(5)
+              else:
+                  sys.exit("SCIWORLD_SERVER_DID_NOT_START")
+              t = time.time()
+              created = call("POST", "/create")
+              print(f"POST /create -> {created} ({time.time() - t:.0f}s)")
+              print("SCIWORLD_SERVER_SELFTEST_PASSED")
+              EOF
+              kill "$SERVER_PID" || true
+              echo "END $(date -Is)"
+              echo SCIWORLD_ENV_BUILD_DONE
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

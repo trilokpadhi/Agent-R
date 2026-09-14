@@ -1,0 +1,20 @@
+        - name: env-server
+          image: {{IMAGE_ENV_SERVER}}
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-sciworld
+              cd /data/src/AgentGym-agentr/agentenv-sciworld
+              exec python -c "import uvicorn; uvicorn.run('agentenv_sciworld:app', host='127.0.0.1', port=36001)"
+          startupProbe:
+            exec:
+              command: ["/data/envs/agentenv-sciworld/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data

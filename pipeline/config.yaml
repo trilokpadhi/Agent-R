@@ -1,0 +1,84 @@
+# Agent-R reproduction: Qwen3.5-9B on WebShop + SciWorld, 3 iterations.
+# Every setting the pipeline uses lives here. Each value names its source.
+# A run = one git commit + this file; the controller refuses to resume a run from a different commit.
+
+run: q35v1                     # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+namespace: ii400r87
+pvc: tpadhi1
+gpus: 7                        # user decision (only 7 H100s are available to the namespace)
+iterations: 3                  # paper: "we conduct Agent-R for three iterations"
+seed: 42
+run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
+
+images:                        # pinned by digest; verified on this cluster (Sep 14)
+  vllm: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+  sft: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope@sha256:cb8aadb783de32cd9df894b0d44b96161b31bed78d1eeafd59e9563a518743c3  # ms-swift 4.5.3, transformers 5.16.1
+  env_server: condaforge/miniforge3:24.3.0-0
+  controller: alpine/k8s@sha256:5efac3ed9955c8747296d520539cded681f4ef5dbb73fb591141df282b61cc35  # 1.32.13, matches the cluster
+
+node_selector_key: nvidia.com/gpu.product
+node_selector_value: NVIDIA-H100-80GB-HBM3
+
+model:
+  name: Qwen3.5-9B
+  base_dir: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+
+environments:                  # prebuilt on the PVC; SciWorld uses the maintainers' AgentGym files (issues #5, #8)
+  webshop:
+    agentenv: /data/src/AgentGym/agentenv
+  sciworld:
+    agentenv: /data/src/AgentGym-agentr/agentenv
+
+inference:                     # shared by search, revision and eval
+  temp: 1                      # paper: expansion temperature 1; user: evaluate at temperature 1
+  max_new_tokens: 500          # upstream llm_server.py max_tokens=500
+  max_token_length: 8192       # maintainer, issue #8
+  enable_thinking: 0           # Agent-R's base model (Llama-3.1) has no thinking mode
+  vllm_dtype: bfloat16
+  vllm_max_model_len: 16384    # KV-cache sizing only; conversations are truncated at 8192 above
+  workers_per_gpu: 6           # measured in pilot A (2.6x faster per GPU than one in-process engine)
+
+search:                        # mcts_collection.py, released code as-is: same tasks every iteration
+  max_depth: 20                # paper
+  itera: 8                     # paper / maintainer issue #3
+  n_gen: 4                     # paper
+  webshop_tasks: 300           # paper: 300 WebShop simulations; ids from the code's range(1000)
+  sciworld_task_iteration: 9   # 23 tasks x 9 variations ~= the paper's 200 SciWorld simulations
+  seed_trees:                  # already-collected iteration-1 WebShop trees (same model, same settings)
+    iter1:
+      webshop: /data/results/mcts-iter1-webshop/mcts_result/webshop/Qwen3.5-9B
+
+revise:                        # path_collection.py --data_type centric --revise 1 (README)
+  alpha: [0.5, 0.7, 1.0]       # paper, per iteration; applied to raw scores as the code does (SciWorld 0-100)
+  beta: 0.2                    # paper
+
+sft_data:
+  # Maintainer (issue #8): each iteration trains on revise_log + high_log entries; paper Table 1 sizes.
+  # Rows above a cap are sampled down with the run seed; rows below it are all used.
+  caps:
+    webshop: {revise: 5500, good: 600}
+    sciworld: {revise: 8000, good: 2500}
+  general_path: /data/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json  # ShareGPT_Vicuna_unfiltered
+  general_fraction: 0.25       # maintainer: (revision + good) : general = 8 : 2
+
+sft:                           # authors' XTuner llama3_8b_instruct_full_alpaca_e3 (issue #8), mapped to ms-swift
+  epochs: [3, 1, 1]            # paper
+  continue_from_previous: true # user decision: iterations 2-3 fine-tune the previous checkpoint
+  max_length: 2048             # XTuner stock (user decision)
+  truncation_strategy: right   # XTuner truncates; ms-swift's default 'delete' would drop long samples
+  learning_rate: 2.0e-5        # XTuner
+  warmup_ratio: 0.03           # XTuner
+  weight_decay: 0              # XTuner
+  max_grad_norm: 1             # XTuner
+  adam_beta1: 0.9              # XTuner
+  adam_beta2: 0.999            # XTuner
+  dtype: bfloat16              # user decision (XTuner uses fp16)
+  global_batch: 112            # XTuner 1 per GPU x 16 accumulation, on our 7 GPUs
+  per_device_batch: 1          # raise after the smoke run measures memory; accumulation = global / (gpus x this)
+  deepspeed: zero2             # Agent-R README: --deepspeed deepspeed_zero2
+  packing: false               # required: Qwen3.5 linear attention does not support packing
+  loss_scale: default          # all assistant turns get loss, as in the released code (user decision)
+
+eval:                          # eval.py
+  max_steps: 100               # paper: up to 100 rounds
+  task_limit: 0                # 0 = full 200-item test sets

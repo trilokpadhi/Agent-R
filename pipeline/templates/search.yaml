@@ -1,0 +1,57 @@
+# Step: MCTS search shard (mcts_collection.py), one GPU.
+# One vLLM server + WORKERS Agent-R processes over disjoint slices of [SHARD_MIN, SHARD_MAX).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: search}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 172800
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: search}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{NODE_KEY}}: {{NODE_VALUE}}
+      initContainers:
+{{SIDECAR}}
+      containers:
+        - name: policy
+          image: {{IMAGE_VLLM}}
+          env:
+{{COMMON_ENV}}
+            - {name: SHARD_MIN, value: "{{SHARD_MIN}}"}
+            - {name: SHARD_MAX, value: "{{SHARD_MAX}}"}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig   # host driver, not the image's compat libcuda
+{{START_VLLM}}
+              cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
+              echo "SEARCH_START $(date -Is) $TASK [$SHARD_MIN,$SHARD_MAX) workers=$WORKERS model=$MODEL_DIR"
+              SPAN=$(( (SHARD_MAX - SHARD_MIN + WORKERS - 1) / WORKERS ))
+              PIDS=()
+              for w in $(seq 0 $((WORKERS - 1))); do
+                LO=$(( SHARD_MIN + w * SPAN )); HI=$(( LO + SPAN )); [ "$HI" -gt "$SHARD_MAX" ] && HI=$SHARD_MAX
+                [ "$LO" -ge "$SHARD_MAX" ] && continue
+                python3 "$CODE/mcts_collection.py" --env_server_base http://127.0.0.1:36001 \
+                  --model_name "$MODEL_NAME" --min "$LO" --max "$HI" {{EXTRA_ARGS}} \
+                  >> "$LOG_DIR/$JOB_NAME.w$w.log" 2>&1 &
+                PIDS+=($!)
+              done
+              RC=0
+              for p in "${PIDS[@]}"; do wait "$p" || RC=1; done
+              kill "$VLLM_PID" 2>/dev/null
+              [ "$RC" -eq 0 ] || { echo "SEARCH_FAILED: a worker exited non-zero; see $LOG_DIR/$JOB_NAME.w*.log"; exit 1; }
+              echo "SEARCH_DONE $(date -Is)"
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}
