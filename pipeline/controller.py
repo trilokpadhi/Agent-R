@@ -440,15 +440,13 @@ class Pipeline:
     # ---------- main ----------
     def main(self):
         self.logs.mkdir(parents=True, exist_ok=True)
+        # A run may be resumed after a fix is committed: every launch is recorded here, and every
+        # step's .done names the commit that produced it.
         meta = self.root / "run.json"
-        if meta.exists():
-            recorded = json.loads(meta.read_text())
-            if recorded["git_sha"] != self.sha:
-                raise RuntimeError(f"run {self.cfg['run']} was started from commit {recorded['git_sha']}, "
-                                   f"not {self.sha}. Use a new run id for new code.")
-        else:
-            meta.write_text(json.dumps({"git_sha": self.sha, "config": self.cfg,
-                                        "started": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+        record = json.loads(meta.read_text()) if meta.exists() else {"launches": []}
+        record["launches"].append({"git_sha": self.sha, "config": self.cfg,
+                                   "started": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        meta.write_text(json.dumps(record, indent=2) + "\n")
         model_dir = self.cfg["model"]["base_dir"]
         for it in range(1, self.cfg["iterations"] + 1):
             log(f"===== iteration {it}: model {model_dir}")

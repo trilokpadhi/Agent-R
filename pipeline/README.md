@@ -30,8 +30,8 @@ kubectl logs -n ii400r87 -f job/agr-q35v1-controller
 
 - Every setting is in the config file, with its source (paper, maintainer issue, or user decision).
 - All images are pinned by digest. Nothing is installed at runtime.
-- A run is tied to one commit: `/data/runs/<run>/run.json` records the commit and config, and the
-  controller refuses to resume a run from a different commit.
+- `/data/runs/<run>/run.json` records every launch (commit + config), and each step's `.done` names
+  the commit that produced it, so a fix can be committed and the run resumed without redoing work.
 - Each finished step writes `.done` with its counts, inputs and commit. Rerunning `deploy.sh`
   resumes: finished steps are skipped and failed child Jobs are recreated.
 - Rendered child manifests are saved to `/data/runs/<run>/logs/manifests/`.
