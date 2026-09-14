@@ -49,7 +49,7 @@ kubectl logs -n ii400r87 -f job/agr-q35v1-controller
   iter<N>/eval/.done            mean final reward per environment
 ```
 
-## Decisions that are not in the paper (recorded Sep 14, 2026)
+## Settings and decisions (recorded Sep 14, 2026)
 
 | Topic | Choice | Why |
 |---|---|---|
@@ -58,9 +58,12 @@ kubectl logs -n ii400r87 -f job/agr-q35v1-controller
 | alpha/beta on SciWorld | raw 0-100 scores | released code does not rescale |
 | Tasks per iteration | the same tasks every iteration | released code (`range(1000)`, variations `1..task_iteration`) |
 | Dataset order | WebShop end to end first (`tasks: [webshop]`), then SciWorld | user |
-| Processes per GPU | 16 for search and revision, sharing one vLLM server | KV-cache arithmetic from measured lengths |
-| SFT max length | **not set yet** | stock XTuner is 2048, but measured revision rows are 4,297-19,651 tokens (median 9,896); the controller stops before SFT until chosen |
+| Processes per GPU | one per task id (search) and one per tree (revision), sharing one vLLM server | set by the data; affects speed only |
+| SFT max length | 8,196 | paper appendix C.1 |
 | Precision | bf16 | user; Qwen3.5 is released in bf16 |
-| Global batch | 112 = 1 x 16 x 7 GPUs | XTuner per-GPU values on our 7 GPUs |
+| Eval temperature | 0 | paper C.1 (AgentGym setting); search stays at 1 (paper) |
+| Training setup | single-task (one dataset per run) | user; paper Table 6 "Single" row, WebShop iteration 3 = 60.66 |
+| vLLM max model length | not set (model default) | caps one request only; path_collection.py truncates by words, so prompts can exceed 8,192 tokens |
+| Global batch | 112 = 1 per GPU x 16 accumulation x 7 GPUs | paper C.1 (paper used 8 A100-80GB) |
 | Trainer | ms-swift 4.5.3 | XTuner has no Qwen3.5 support |
 | Packing | off | Qwen3.5 linear attention does not support it |

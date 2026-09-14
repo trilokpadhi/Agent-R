@@ -34,8 +34,6 @@ inference:
   max_token_length: 8192
   enable_thinking: 0
   vllm_dtype: bfloat16
-  vllm_max_model_len: 16384
-  workers_per_gpu: 6
 
 search:
   max_depth: 4                 # SMOKE
@@ -49,7 +47,6 @@ search:
 revise:
   alpha: [0, 0, 0]             # SMOKE: keep every pair so every step has data
   beta: 0
-  workers_per_gpu: 16
 
 sft_data:
   caps:
@@ -61,7 +58,7 @@ sft_data:
 sft:
   epochs: [1, 1, 1]            # SMOKE
   continue_from_previous: true
-  max_length: 2048
+  max_length: 8196
   truncation_strategy: right
   learning_rate: 2.0e-5
   warmup_ratio: 0.03
@@ -77,5 +74,6 @@ sft:
   loss_scale: default
 
 eval:
+  temp: 0
   max_steps: 5                 # SMOKE
   task_limit: 2                # SMOKE

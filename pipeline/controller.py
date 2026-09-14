@@ -146,7 +146,7 @@ class Pipeline:
             "LOG_DIR": self.logs,
         }
 
-    def inference_env(self, job_name, task, model_dir, workdir, model_type="Raw", workers=None):
+    def inference_env(self, job_name, task, model_dir, workdir, workers, model_type="Raw", temp=None):
         """Env block shared by search, revise and eval containers (12-space YAML indent)."""
         c, inf, s = self.cfg, self.cfg["inference"], self.cfg["search"]
         env = {
@@ -161,15 +161,14 @@ class Pipeline:
             "MAX_DEPTH": s["max_depth"],
             "ITERA": s["itera"],
             "N_GEN": s["n_gen"],
-            "TEMP": inf["temp"],
+            "TEMP": inf["temp"] if temp is None else temp,
             "MAX_TOKEN_LENGTH": inf["max_token_length"],
             "MAX_NEW_TOKENS": inf["max_new_tokens"],
             "ENABLE_THINKING": inf["enable_thinking"],
             "STOP_TOKENS": "",
             "VLLM_DTYPE": inf["vllm_dtype"],
-            "VLLM_MAX_MODEL_LEN": inf["vllm_max_model_len"],
             "VLLM_API_BASE": "http://127.0.0.1:8000/v1",
-            "WORKERS": workers or inf["workers_per_gpu"],
+            "WORKERS": workers,
             "PYTHONPATH": f"{self.code}:{c['environments'][task]['agentenv']}:/data/envs/policy-site",
             "PYTHONUNBUFFERED": "1",
             "HF_HOME": "/data/models/huggingface",
@@ -180,7 +179,7 @@ class Pipeline:
 
     START_VLLM = "\n".join([
         '              python3 -m vllm.entrypoints.openai.api_server --model "$MODEL_DIR" --dtype "$VLLM_DTYPE" \\',
-        '                --max-model-len "$VLLM_MAX_MODEL_LEN" --gpu-memory-utilization 0.90 --port 8000 \\',
+        '                --gpu-memory-utilization 0.90 --port 8000 \\',
         '                > "$LOG_DIR/$JOB_NAME.vllm.log" 2>&1 &',
         '              VLLM_PID=$!',
         '              for i in $(seq 1 180); do',
@@ -254,7 +253,7 @@ class Pipeline:
             name = self.job_name(iteration, f"search-{task[:2]}", k)
             values = self.base_values(name) | {
                 "SIDECAR": self.sidecar(task),
-                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir),
+                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir, workers=hi - lo),
                 "START_VLLM": self.START_VLLM,
                 "SHARD_MIN": lo,
                 "SHARD_MAX": hi,
@@ -283,14 +282,13 @@ class Pipeline:
         for k, chunk in enumerate(split_evenly(files, self.cfg["gpus"])):
             name = self.job_name(iteration, f"revise-{task[:2]}", k)
             input_dir = step_dir / "input" / f"shard{k}"
-            if self.job_state(name) != "succeeded":
+            if self.job_state(name) in (None, "failed"):  # never touch the inputs of a running job
                 shutil.rmtree(input_dir, ignore_errors=True)
                 for f in chunk:  # one folder per tree, so one path_collection process per tree
                     (input_dir / f.stem).mkdir(parents=True)
                     (input_dir / f.stem / f.name).symlink_to(f)
             values = self.base_values(name) | {
-                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / f"shard{k}",
-                                                 workers=self.cfg["revise"]["workers_per_gpu"]),
+                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / f"shard{k}", workers=len(chunk)),
                 "START_VLLM": self.START_VLLM,
                 "ALPHA": alpha,
                 "BETA": beta,
@@ -428,7 +426,8 @@ class Pipeline:
             limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
             values = self.base_values(name) | {
                 "SIDECAR": self.sidecar(task),
-                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, model_type),
+                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
+                                                 model_type=model_type, temp=e["temp"]),
                 "START_VLLM": self.START_VLLM,
                 "MAX_STEPS": e["max_steps"],
                 "TASK_LIMIT_ENV": limit,
