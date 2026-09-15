@@ -16,10 +16,17 @@ SSH=(ssh -o ControlMaster=no -o "ControlPath=$HOME/.ssh/cm-%r@%h:%p" -o BatchMod
 K='export PATH="$HOME/.local/bin:$PATH"; timeout 300 kubectl -n ii400r87'
 
 cd "$(git rev-parse --show-toplevel)"
-if [ -n "$(git status --porcelain --untracked-files=no)" ] || [ -n "$(git ls-files --others --exclude-standard pipeline)" ]; then
-  echo "Commit your changes first: a pipeline run must correspond to a git commit." >&2
-  git status --short >&2
+# Only committed code is deployed (git archive HEAD). Refuse if code the jobs run has uncommitted
+# changes, so nobody believes an edit is running when it is not; other changes are just reported.
+CODE_PATHS=(pipeline mcts_utils mcts_collection.py path_collection.py eval.py)
+if [ -n "$(git status --porcelain -- "${CODE_PATHS[@]}")" ]; then
+  echo "Commit your changes first: these files are used by the jobs and are not committed:" >&2
+  git status --short -- "${CODE_PATHS[@]}" >&2
   exit 1
+fi
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Note: uncommitted changes outside the pipeline code are NOT deployed:"
+  git status --short --untracked-files=no
 fi
 git ls-files --error-unmatch "$CONFIG" >/dev/null
 
