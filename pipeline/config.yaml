@@ -2,7 +2,8 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35ws                     # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+run: q35ws2                    # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+                               # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
 tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
 namespace: ii400r87
 pvc: tpadhi1
@@ -32,7 +33,9 @@ environments:                  # prebuilt on the PVC; SciWorld uses the maintain
 
 inference:                     # shared by search and revision (eval overrides temp below)
   temp: 1                      # paper: expansion temperature 1; also the code's default TEMP (llm_server.py)
-  max_new_tokens: 500          # upstream llm_server.py max_tokens=500
+  max_new_tokens: none         # user (Sep 15): no output cap for Qwen3.5. The authors' 500 fits Llama-3.1's short
+                               # thoughts, but cut off >10% of Qwen3.5 replies before 'Action:' (10,194 cut-off turns in
+                               # q35ws iter-1 training data), so the trained model looped in eval
   max_token_length: 8192       # maintainer, issue #8
   enable_thinking: 0           # Agent-R's base model (Llama-3.1) has no thinking mode
   vllm_dtype: bfloat16
@@ -47,10 +50,7 @@ search:                        # mcts_collection.py, released code as-is: same t
   n_gen: 4                     # paper
   webshop_tasks: 300           # paper: 300 WebShop simulations; ids from the code's range(1000)
   sciworld_task_iteration: 9   # 23 tasks x 9 variations ~= the paper's 200 SciWorld simulations
-  seed_trees:                  # already-collected iteration-1 WebShop trees (same model, same settings)
-    iter1:
-      webshop: /data/runs/q35v1/iter1/search-webshop/mcts_result/webshop/Qwen3.5-9B   # 300 trees
-      # SciWorld run later: /data/runs/q35v1/iter1/search-sciworld/mcts_result/sciworld/Qwen3.5-9B (207 trees)
+  seed_trees: {}               # none: the earlier trees were collected with the 500-token cap
 
 revise:                        # path_collection.py --data_type centric --revise 1 (README)
   alpha: [0.5, 0.7, 1.0]       # paper, per iteration; applied to raw scores as the code does (SciWorld 0-100)

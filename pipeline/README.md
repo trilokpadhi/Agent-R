@@ -62,6 +62,7 @@ kubectl logs -n ii400r87 -f job/agr-q35v1-controller
 | SFT max length | 8,196 | paper appendix C.1 |
 | Precision | bf16 | user; Qwen3.5 is released in bf16 |
 | Eval temperature | 0 | paper C.1 (AgentGym setting); search stays at 1 (paper) |
+| Output cap per model reply | none (authors: 500) | user; the 500 cap cut off >10% of Qwen3.5 replies before `Action:`, training taught the model those cut-off replies, and iteration-1 eval looped (run q35ws: 14.6, 80 of 104 tasks hit 100 steps) |
 | Training setup | single-task (one dataset per run) | user; paper Table 6 "Single" row, WebShop iteration 3 = 60.66 |
 | vLLM max model length | not set (model default) | caps one request only; path_collection.py truncates by words, so prompts can exceed 8,192 tokens |
 | Global batch | 112 = 1 per GPU x 16 accumulation x 7 GPUs | paper C.1 (paper used 8 A100-80GB) |

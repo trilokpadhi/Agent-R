@@ -53,7 +53,10 @@ class FuncCallOffline:
             print("TEMP 不存在，已设置为 1")
         self.stop = [s for s in os.environ.get("STOP_TOKENS", "<|eot_id|>").split(",") if s] or None
         self.temperature = float(os.environ["TEMP"])
-        self.max_new_tokens = int(os.environ.get("MAX_NEW_TOKENS", "500"))
+        # MAX_NEW_TOKENS="none" removes the output cap (vLLM then stops at end-of-turn or the context
+        # length). Default 500 keeps the original Llama behaviour.
+        max_new = os.environ.get("MAX_NEW_TOKENS", "500").strip().lower()
+        self.max_new_tokens = None if max_new in ("", "none") else int(max_new)
         if not self.api_base:
             from vllm import SamplingParams
 
