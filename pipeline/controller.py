@@ -413,6 +413,32 @@ class Pipeline:
         self.mark_done(step_dir, {"checkpoint": str(ckpt), "base": model_dir, "data": str(data_path)})
         return str(ckpt)
 
+    # Non-weight files the vLLM image reads. ms-swift (transformers 5.16) rewrites them in a format the
+    # vLLM image's transformers 4.57 cannot parse (processor_config.json -> KeyError 'qwen3_5'; seen Sep 15).
+    # Full fine-tuning changes weights, never shapes, so the base model's files describe the checkpoint exactly.
+    SERVING_FILES = ["config.json", "preprocessor_config.json", "video_preprocessor_config.json",
+                     "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "chat_template.jinja"]
+    SWIFT_ONLY_FILES = ["processor_config.json", "generation_config.json"]  # absent from the base model
+
+    def prepare_checkpoint_for_vllm(self, ckpt):
+        """Give a fine-tuned checkpoint the base model's non-weight files; weights are not touched.
+        ms-swift's own versions are kept in swift_saved_configs/. Idempotent."""
+        ckpt, base = Path(ckpt), Path(self.cfg["model"]["base_dir"])
+        if ckpt == base or (ckpt / "SERVING_FILES_FROM_BASE.txt").exists():
+            return
+        saved = ckpt / "swift_saved_configs"
+        saved.mkdir(exist_ok=True)
+        for name in self.SERVING_FILES + self.SWIFT_ONLY_FILES:
+            if (ckpt / name).exists() and not (saved / name).exists():
+                shutil.move(str(ckpt / name), saved / name)
+        for name in self.SERVING_FILES:
+            if (base / name).exists():
+                shutil.copy2(base / name, ckpt / name)
+        (ckpt / "SERVING_FILES_FROM_BASE.txt").write_text(
+            f"Non-weight files copied from {base} for serving with the vLLM image; ms-swift's originals are in "
+            f"swift_saved_configs/. Weights (model-*.safetensors, index) are the fine-tuned ones.\n")
+        log(f"prepared {ckpt} for vLLM: base model config/tokenizer files, fine-tuned weights")
+
     def step_eval(self, iteration, model_dir):
         step_dir = self.root / f"iter{iteration}" / "eval"
         if self.done(step_dir):
@@ -466,6 +492,7 @@ class Pipeline:
             data = self.step_sft_data(it)
             start = model_dir if self.cfg["sft"]["continue_from_previous"] else self.cfg["model"]["base_dir"]
             model_dir = self.step_sft(it, start, data)
+            self.prepare_checkpoint_for_vllm(model_dir)
             self.step_eval(it, model_dir)
         log("PIPELINE_DONE")
 
