@@ -42,7 +42,7 @@ spec:
               echo "SFT_START $(date -Is) model={{MODEL_DIR}} data={{DATA_PATH}} epochs={{EPOCHS}} per_device={{PER_DEVICE_BATCH}} accumulation={{GRAD_ACCUM}}"
               swift sft \
                 --model "{{MODEL_DIR}}" \
-                --train_type full \
+                --tuner_type full \
                 --dataset "{{DATA_PATH}}" \
                 --torch_dtype {{DTYPE}} \
                 --max_length {{MAX_LENGTH}} \
