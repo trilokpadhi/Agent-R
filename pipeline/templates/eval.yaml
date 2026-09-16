@@ -23,6 +23,8 @@ spec:
           env:
 {{COMMON_ENV}}
             - {name: MAX_STEPS, value: "{{MAX_STEPS}}"}
+            - {name: TASK_SHARD, value: "{{TASK_SHARD}}"}
+            - {name: TASK_SHARDS, value: "{{TASK_SHARDS}}"}
 {{TASK_LIMIT_ENV}}
           command: ["bash", "-c"]
           args:

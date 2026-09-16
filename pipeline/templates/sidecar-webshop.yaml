@@ -7,7 +7,18 @@
               source /opt/conda/etc/profile.d/conda.sh
               conda activate /data/envs/agentenv-webshop
               cd /data/src/AgentGym/agentenv-webshop/webshop
-              exec webshop --host 127.0.0.1 --port 36001
+              # WebShop draws product prices with an UNSEEDED global RNG inside load_products(), and
+              # only seeds afterwards (SimServer.__init__: load_products -> get_goals -> random.seed(233)).
+              # Every server start therefore invents different prices, and the per-goal "under $X" cap
+              # comes from them, so the same task id means different things in different pods and steps.
+              # sitecustomize.py runs at interpreter start in every uvicorn worker, before any import,
+              # so all workers and all pods generate identical prices. This is what makes --workers safe.
+              python -c "import site, os; open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import random\nrandom.seed(233)\n')"
+              python -c "import random; assert random.random() == __import__('random').Random(233).random(), 'seed not applied'" \
+                || { echo "SIDECAR_FAILED: sitecustomize seed not in effect"; exit 1; }
+              # One worker serialises every environment call from all MCTS processes on this GPU, and
+              # Agent-R replays the episode from step 1 for each generation (~11 env calls per model call).
+              exec webshop --host 127.0.0.1 --port 36001 --workers {{ENV_WORKERS}}
           startupProbe:
             exec:
               command: ["/data/envs/agentenv-webshop/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"]

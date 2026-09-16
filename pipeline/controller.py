@@ -192,7 +192,8 @@ class Pipeline:
     ])
 
     def sidecar(self, task):
-        return self.render(f"sidecar-{task}.yaml", {"IMAGE_ENV_SERVER": self.cfg["images"]["env_server"]})
+        return self.render(f"sidecar-{task}.yaml", {"IMAGE_ENV_SERVER": self.cfg["images"]["env_server"],
+                                                    "ENV_WORKERS": self.cfg["inference"]["env_workers"]})
 
     def done(self, step_dir):
         return (step_dir / ".done").exists()
@@ -446,19 +447,25 @@ class Pipeline:
             return
         e = self.cfg["eval"]
         model_type = f"agentr-iter{iteration}"
+        # One Job per GPU per task: the 200 test ids are striped over the shards, which all write to
+        # the same result directory. Eval used to run on a single GPU while the other six sat idle.
+        shards = self.cfg["gpus"]
         jobs = []
         for task in self.tasks:
-            name = self.job_name(iteration, f"eval-{task[:2]}")
-            limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
-            values = self.base_values(name) | {
-                "SIDECAR": self.sidecar(task),
-                "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
-                                                 model_type=model_type, temp=e["temp"]),
-                "START_VLLM": self.START_VLLM,
-                "MAX_STEPS": e["max_steps"],
-                "TASK_LIMIT_ENV": limit,
-            }
-            jobs.append((name, self.render("eval.yaml", values)))
+            for shard in range(shards):
+                name = self.job_name(iteration, f"eval-{task[:2]}", shard)
+                limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
+                values = self.base_values(name) | {
+                    "SIDECAR": self.sidecar(task),
+                    "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
+                                                     model_type=model_type, temp=e["temp"]),
+                    "START_VLLM": self.START_VLLM,
+                    "MAX_STEPS": e["max_steps"],
+                    "TASK_SHARD": shard,
+                    "TASK_SHARDS": shards,
+                    "TASK_LIMIT_ENV": limit,
+                }
+                jobs.append((name, self.render("eval.yaml", values)))
         log(f"iter{iteration} eval: {model_dir}")
         self.run_jobs(jobs)
         summary = {"model_dir": model_dir}

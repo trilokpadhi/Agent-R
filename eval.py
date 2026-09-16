@@ -70,6 +70,12 @@ def main(Task: str, model_name: str, env_server_base: str, max_steps: int):
     if "TASK_LIMIT" in os.environ:
         task_inds = task_inds[:int(os.environ["TASK_LIMIT"])]
 
+    # Eval is sharded over GPUs: shard i takes every TASK_SHARDS-th id. Every shard writes to the
+    # same result directory and the skip check below ignores finished ids, so shards never collide.
+    shards = int(os.environ.get("TASK_SHARDS", 1))
+    if shards > 1:
+        task_inds = task_inds[int(os.environ["TASK_SHARD"])::shards]
+
     # Load the model once; constructing FuncCallOffline per task re-creates the vLLM engine
     calling = FuncCallOffline(model_name=model_name)
 
