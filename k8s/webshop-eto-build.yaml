@@ -1,0 +1,101 @@
+# One-time CPU build of the Co-Evolving / ETO WebShop environment on the PVC.
+#
+# Why: Agent-R runs AgentGym's WebShop, which is the 1,000-product subset with its own 200-item
+# test split. The paper table we must match was produced on the FULL catalogue (1,181,430 products,
+# 12,087 human goals) with the ETO split. The two test sets overlap by 3 of 200 items, so a number
+# produced on AgentGym cannot go in that table.
+#
+# This Job does NOT touch /data/src/AgentGym. It creates a separate tree at /data/src/webshop-eto.
+# The Lucene index is downloaded pre-built (indexes.zip), so nothing is indexed here.
+#
+#   kubectl apply -n ii400r87 -f k8s/webshop-eto-build.yaml
+#   kubectl logs -n ii400r87 -f job/webshop-eto-build-001
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: webshop-eto-build-001
+  labels: {project: agent-r, step: env-build}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, step: env-build}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: build
+          image: condaforge/miniforge3:24.3.0-0
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              python -V; java -version 2>&1 | head -1
+
+              SRC=/data/src/webshop-eto
+              # Co-Evolving's own WebShop source: it carries their RNG-injection patches
+              # (generate_product_prices(rng=), load_products(product_price_rng=), get_goals(price_cap_rng=))
+              # and the manifest support that freezes product prices. Pinned to the commit we read.
+              if [ ! -d "$SRC/.git" ]; then
+                rm -rf "$SRC.tmp"
+                git clone --no-checkout https://github.com/YeonsungJung/Co-Evolving-Agents.git "$SRC.tmp"
+                git -C "$SRC.tmp" checkout cc43f24
+                mv "$SRC.tmp" "$SRC"
+              fi
+              git -C "$SRC" rev-parse HEAD
+
+              WS="$SRC/envs/webshop"
+              cd "$WS"
+              # Path layout the package hard-codes (web_agent_site/utils.py):
+              #   BASE_DIR              = envs/webshop/src
+              #   DEFAULT_FILE_PATH     = envs/webshop/data/items_shuffle.json
+              #   search index          = envs/webshop/search_index/indexes
+              pip install --no-input gdown
+
+              if [ ! -f data/items_shuffle.json ]; then
+                echo "== downloading products (data.zip)"
+                gdown "https://drive.google.com/uc?id=1G_0ccLWn5kZE5rpeyAdh_YuoNzvBUjT9" -O data.zip
+                unzip -o -q data.zip && rm -f data.zip
+              fi
+              if [ ! -d search_index/indexes ]; then
+                echo "== downloading prebuilt Lucene index (indexes.zip)"
+                gdown "https://drive.google.com/uc?id=11zOUDkJSgGhYin9NxQtG8PVpDsika86y" -O indexes.zip
+                mkdir -p search_index && unzip -o -q indexes.zip -d search_index/ && rm -f indexes.zip
+              fi
+              du -sh data search_index; ls data search_index
+
+              echo "== self-test: full catalogue + full index"
+              cd "$WS"
+              PYTHONPATH="$WS/src" python - <<'PY'
+              import json, time
+              from webshop.web_agent_site.envs import WebAgentTextEnv
+              t0 = time.time()
+              # No num_products -> full items_shuffle.json and the full 'indexes' directory,
+              # exactly as Co-Evolving's eval_agent/main.py constructs it.
+              env = WebAgentTextEnv(observation_mode="text", human_goals=True)
+              print(f"built in {time.time()-t0:.1f}s")
+              print("products:", len(env.server.all_products))
+              print("goals:   ", len(env.server.goals))
+              # 314 is the first id in Co-Evolving's eval_agent/data/webshop/test_indices.json
+              env.reset(314)
+              print("--- observation for test id 314 ---")
+              print(env.observation[:400])
+              t0 = time.time()
+              env.step("search[black shorts]")
+              print(f"search step: {time.time()-t0:.2f}s")
+              print(env.observation[:300])
+              PY
+              echo "WEBSHOP_ETO_BUILD_PASSED"
+          resources:
+            # Loading the full 1.18M-product catalogue is memory-hungry (the 1,000-product subset is
+            # not a guide). Request modestly so it schedules; the limit is the headroom.
+            requests: {cpu: "2", memory: 16Gi}
+            limits: {cpu: "8", memory: 64Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
