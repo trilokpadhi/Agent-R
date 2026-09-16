@@ -1,0 +1,151 @@
+# One-H100 Job: Agent-R MCTS trajectory collection for Qwen3.5-9B on WebShop, iteration 1,
+# with the paper's settings: ITERA=8 rollouts, MAX_DEPTH=20, N_GEN=4 candidates, c_uct=0.25
+# (mcts_raw default), TEMP=1 for expansion, MAX_TOKEN_LENGTH=8192 (maintainer, issue #8).
+#
+# Sharding: mcts_collection.py iterates range(1000)[SHARD_MIN:SHARD_MAX] and skips test ids and
+# ids missing from webshop_train_clean.json. --min 0 --max 471 covers the first 300 usable ids.
+# All shards write to one directory; ids that already have a result file are skipped, so a
+# shard can be resubmitted after a failure.
+#
+# Output: /data/results/mcts-iter1-webshop/mcts_result/webshop/Qwen3.5-9B/search_results_<id>.json
+# Apply: kubectl apply -n ii400r87 -f k8s/qwen35-webshop-mcts.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-webshop-mcts-it1-a03
+  labels:
+    project: agent-r
+    stage: mcts-iter1
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: mcts-iter1
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: webshop-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-webshop/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: JOB_NAME
+              value: qwen35-webshop-mcts-it1-a03
+            - name: SHARD_MIN
+              value: "231"
+            - name: SHARD_MAX
+              value: "340"
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+            - name: MODEL_NAME
+              value: Qwen3.5-9B
+            - name: MODEL_TYPE
+              value: Raw
+            - name: TASK
+              value: webshop
+            - name: MAX_DEPTH
+              value: "20"
+            - name: ITERA
+              value: "8"
+            - name: N_GEN
+              value: "4"
+            - name: TEMP
+              value: "1"
+            - name: MAX_TOKEN_LENGTH
+              value: "8192"
+            - name: MAX_NEW_TOKENS
+              value: "500"
+            - name: VLLM_DTYPE
+              value: bfloat16
+            - name: VLLM_MAX_MODEL_LEN
+              value: "16384"
+            - name: STOP_TOKENS
+              value: ""
+            - name: ENABLE_THINKING
+              value: "0"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+              python3 -c "import urllib.request; print('webshop server:', urllib.request.urlopen('http://127.0.0.1:36001/', timeout=5).read().decode())"
+
+              RUN_DIR=/data/results/mcts-iter1-webshop
+              mkdir -p "$RUN_DIR" /data/logs
+              cd "$RUN_DIR"
+              ln -sfn /data/src/Agent-R/mcts_utils mcts_utils
+              echo "START $(date -Is) shard [$SHARD_MIN, $SHARD_MAX) in $RUN_DIR"
+
+              python3 /data/src/Agent-R/mcts_collection.py \
+                --env_server_base http://127.0.0.1:36001 \
+                --model_name "$MODEL_NAME" \
+                --min "$SHARD_MIN" --max "$SHARD_MAX" 2>&1 | tee -a "/data/logs/$JOB_NAME.log"
+
+              echo "== results"
+              python3 - <<'EOF'
+              import glob, json, os
+
+              def walk(node, depth=0):
+                  children = node.get("children") or []
+                  stats = [(depth, node.get("env_score", 0))]
+                  for child in children:
+                      stats += walk(child, depth + 1)
+                  return stats
+
+              out_dir = f"mcts_result/{os.environ['TASK']}/{os.environ['MODEL_NAME']}"
+              files = sorted(glob.glob(f"{out_dir}/search_results_*.json"), key=os.path.getmtime)
+              print("result files in shared dir:", len(files))
+              for path in files[-10:]:
+                  root = json.load(open(path))
+                  stats = walk(root)
+                  print(f"{os.path.basename(path)}: nodes={len(stats)} max_depth={max(d for d, _ in stats)} "
+                        f"max_env_score={max(s for _, s in stats)} root_value={root.get('value')} root_visits={root.get('visits')} "
+                        f"size={os.path.getsize(path) // 1024}KB")
+              EOF
+              echo "END $(date -Is)"
+              echo QWEN_WEBSHOP_MCTS_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

@@ -174,6 +174,7 @@ class Pipeline:
             "HF_HOME": "/data/models/huggingface",
             "HF_HUB_OFFLINE": "1",
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "WEBSHOP_PROTOCOL": c["webshop_protocol"],
         }
         return "\n".join(f"            - {{name: {k}, value: {json.dumps(str(v))}}}" for k, v in env.items())
 
@@ -193,7 +194,9 @@ class Pipeline:
 
     def sidecar(self, task):
         return self.render(f"sidecar-{task}.yaml", {"IMAGE_ENV_SERVER": self.cfg["images"]["env_server"],
-                                                    "ENV_WORKERS": self.cfg["inference"]["env_workers"]})
+                                                    "ENV_WORKERS": self.cfg["inference"]["env_workers"],
+                                                    "WEBSHOP_PROTOCOL": self.cfg["webshop_protocol"],
+                                                    "SHA": self.sha})
 
     def done(self, step_dir):
         return (step_dir / ".done").exists()
@@ -204,11 +207,22 @@ class Pipeline:
 
     # ---------- task shards (released code: same tasks every iteration) ----------
     def webshop_shards(self):
+        """(min, max) --min/--max pairs for mcts_collection.py, one per GPU.
+
+        Both protocols pass POSITIONS, not ids, but into different lists:
+        agentgym slices range(1000) and skips unusable ids inside process_task; eto slices ETO's
+        explicit train_indices.json. The paper samples 300 WebShop simulations either way.
+        """
+        n_tasks = self.cfg["search"]["webshop_tasks"]
+        if self.cfg["webshop_protocol"] == "eto":
+            # process_task slices load_split("train")[min:max], so positions 0..n_tasks.
+            positions = list(range(n_tasks))
+            return [(c[0], c[-1] + 1) for c in split_evenly(positions, self.cfg["gpus"])], n_tasks
         train = json.loads((self.code / "mcts_utils/webshop/webshop_train_clean.json").read_text())
         test = json.loads((self.code / "mcts_utils/webshop/webshop_test.json").read_text())
         test_ids = {t["item_id"].replace("webshop_", "") for t in test}
         usable = [i for i in range(1000) if str(i) in train and str(i) not in test_ids]  # mcts_collection.py:101
-        usable = usable[: self.cfg["search"]["webshop_tasks"]]
+        usable = usable[: n_tasks]
         ranges = []
         for chunk in split_evenly(usable, self.cfg["gpus"]):
             ranges.append((chunk[0], chunk[-1] + 1))

@@ -1,0 +1,78 @@
+# Short one-H100 diagnostic Job for the vLLM image.
+# qwen35-9b-vllm-smoke-002 failed with CUDA "Error 803: system has unsupported display
+# driver / cuda driver combination" on driver 590.48.01. That error usually means a CUDA
+# forward-compatibility libcuda (older than the host driver) is loaded instead of the
+# host driver's libcuda. This Job prints where libcuda comes from and tests torch.cuda:
+#   A) image defaults
+#   B) LD_LIBRARY_PATH without any "compat" entries
+#   C) B plus LD_PRELOAD of the host driver's libcuda
+# Apply: kubectl apply -n ii400r87 -f k8s/vllm-cuda-diagnose.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vllm-cuda-diagnose-001
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: diag
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              echo "== driver"
+              cat /proc/driver/nvidia/version
+              nvidia-smi --query-gpu=name,driver_version --format=csv
+              echo "== env"
+              echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+              echo "LD_PRELOAD=${LD_PRELOAD:-<unset>}"
+              env | grep -E '^(CUDA|NVIDIA|VLLM)' | sort
+              echo "== /etc/ld.so.conf.d"
+              grep -H . /etc/ld.so.conf.d/* 2>/dev/null
+              echo "== cuda dirs"
+              ls -d /usr/local/cuda* 2>/dev/null
+              ls -la /usr/local/cuda/compat 2>/dev/null
+              echo "== libcuda / libnvidia-ml files"
+              find / \( -path /proc -o -path /sys -o -path /data \) -prune -o \( -name 'libcuda.so*' -o -name 'libnvidia-ml.so*' \) -print 2>/dev/null | sort
+              echo "== ldconfig cache"
+              ldconfig -p | grep -E 'libcuda\.so|libnvidia-ml\.so'
+
+              cat > /tmp/cuda_check.py <<'EOF'
+              import torch
+              ok = torch.cuda.is_available()
+              print("torch", torch.__version__, "| built for CUDA", torch.version.cuda, "| is_available:", ok)
+              if ok:
+                  x = torch.randn(1024, 1024, device="cuda")
+                  print("matmul ok:", float((x @ x).abs().sum()) > 0, "|", torch.cuda.get_device_name(0))
+              print("libcuda loaded from:", sorted({l.split()[-1] for l in open("/proc/self/maps") if "libcuda.so" in l}))
+              EOF
+
+              NOCOMPAT=$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v -i compat | paste -sd: -)
+              HOSTCUDA=$(find / \( -path /proc -o -path /sys -o -path /data -o -path '/usr/local/cuda*' \) -prune -o -name 'libcuda.so.590*' -print 2>/dev/null | sort | tail -n 1)
+              echo "NOCOMPAT=$NOCOMPAT"
+              echo "HOSTCUDA=$HOSTCUDA"
+
+              echo "== TEST A: image defaults"
+              python3 /tmp/cuda_check.py 2>&1 | tail -n 6
+              echo "== TEST B: LD_LIBRARY_PATH without compat entries"
+              env LD_LIBRARY_PATH="$NOCOMPAT" python3 /tmp/cuda_check.py 2>&1 | tail -n 6
+              if [ -n "$HOSTCUDA" ]; then
+                echo "== TEST C: no compat + LD_PRELOAD=$HOSTCUDA"
+                env LD_LIBRARY_PATH="$NOCOMPAT" LD_PRELOAD="$HOSTCUDA" python3 /tmp/cuda_check.py 2>&1 | tail -n 6
+              else
+                echo "== TEST C skipped: no libcuda.so.590* found outside /usr/local/cuda*"
+              fi
+              echo VLLM_CUDA_DIAGNOSE_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"

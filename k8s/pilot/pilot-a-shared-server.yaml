@@ -1,0 +1,168 @@
+# PILOT A - option 1: ONE vLLM OpenAI server per GPU, several Agent-R workers sending
+# concurrent requests so the server batches them.
+#
+# Sampling is unchanged (TEMP=1, max_tokens=500, enable_thinking=False, bfloat16): only the
+# transport differs - requests go over HTTP to a local server instead of an in-process engine.
+#
+# Range [405,438): the first half of shard w08's range, which never started, so no running
+# shard is disturbed. Results go to a pilot-only directory so the measurement is clean.
+#
+# Apply: kubectl apply -n ii400r87 -f k8s/pilot/pilot-a-shared-server.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pilot-a-shared-server
+  labels:
+    project: agent-r
+    stage: mcts-pilot
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: mcts-pilot
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      initContainers:
+        - name: webshop-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-webshop/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: JOB_NAME
+              value: pilot-a-shared-server
+            - name: WORKERS
+              value: "6"
+            - name: SHARD_MIN
+              value: "405"
+            - name: SHARD_MAX
+              value: "438"
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+            - name: MODEL_NAME
+              value: Qwen3.5-9B
+            - name: MODEL_TYPE
+              value: Raw
+            - name: TASK
+              value: webshop
+            - name: MAX_DEPTH
+              value: "20"
+            - name: ITERA
+              value: "8"
+            - name: N_GEN
+              value: "4"
+            - name: TEMP
+              value: "1"
+            - name: MAX_TOKEN_LENGTH
+              value: "8192"
+            - name: MAX_NEW_TOKENS
+              value: "500"
+            - name: VLLM_DTYPE
+              value: bfloat16
+            - name: VLLM_MAX_MODEL_LEN
+              value: "16384"
+            - name: STOP_TOKENS
+              value: ""
+            - name: ENABLE_THINKING
+              value: "0"
+            - name: VLLM_API_BASE
+              value: http://127.0.0.1:8000/v1
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              nvidia-smi --query-gpu=name --format=csv,noheader
+              python3 -c "import urllib.request; print('webshop server:', urllib.request.urlopen('http://127.0.0.1:36001/', timeout=5).read().decode())"
+
+              RUN_DIR=/data/results/pilot-a-shared-server
+              mkdir -p "$RUN_DIR" /data/logs
+              cd "$RUN_DIR"
+              ln -sfn /data/src/Agent-R/mcts_utils mcts_utils
+
+              echo "== starting one vLLM server for all $WORKERS workers"
+              python3 -m vllm.entrypoints.openai.api_server \
+                --model "$MODEL_DIR" \
+                --dtype "$VLLM_DTYPE" \
+                --max-model-len "$VLLM_MAX_MODEL_LEN" \
+                --gpu-memory-utilization 0.90 \
+                --port 8000 > /data/logs/$JOB_NAME-vllm.log 2>&1 &
+              VLLM_PID=$!
+
+              for i in $(seq 1 120); do
+                if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" 2>/dev/null; then
+                  echo "vLLM server ready after ${i}0s"; break
+                fi
+                if ! kill -0 $VLLM_PID 2>/dev/null; then
+                  echo "PILOT_A_FAILED: vLLM server died"; tail -30 /data/logs/$JOB_NAME-vllm.log; exit 1
+                fi
+                sleep 10
+              done
+
+              echo "PILOT_A_START $(date -Is) range [$SHARD_MIN,$SHARD_MAX) workers=$WORKERS"
+              START=$(date +%s)
+
+              # Disjoint id slices, one per worker; all share the single server above.
+              SPAN=$(( (SHARD_MAX - SHARD_MIN + WORKERS - 1) / WORKERS ))
+              for w in $(seq 0 $((WORKERS - 1))); do
+                LO=$(( SHARD_MIN + w * SPAN ))
+                HI=$(( LO + SPAN )); [ "$HI" -gt "$SHARD_MAX" ] && HI=$SHARD_MAX
+                [ "$LO" -ge "$SHARD_MAX" ] && continue
+                echo "worker $w -> [$LO,$HI)"
+                python3 /data/src/Agent-R/mcts_collection.py \
+                  --env_server_base http://127.0.0.1:36001 \
+                  --model_name "$MODEL_NAME" \
+                  --min "$LO" --max "$HI" >> "/data/logs/$JOB_NAME.log" 2>&1 &
+              done
+              wait
+
+              END=$(date +%s)
+              N=$(ls mcts_result/webshop/$MODEL_NAME/ 2>/dev/null | wc -l)
+              G=$(grep -c "###RAW TEXT:" /data/logs/$JOB_NAME.log 2>/dev/null || echo 0)
+              echo "PILOT_A_RESULT elapsed_s=$((END-START)) tasks=$N generations=$G"
+              echo PILOT_A_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

@@ -155,7 +155,9 @@ class ExtendedMCTS(MCTSAgent):
         current_env = self.env
         current_recent_actions = deepcopy(node.recent_actions)
 
-        if f"Action {ind}:" in agent_response:
+        if os.environ.get("WEBSHOP_PROTOCOL", "").lower() == "eto":
+            new_action = agent_response   # the ETO server parses "Action:" itself
+        elif f"Action {ind}:" in agent_response:
             new_action = agent_response.split(f"Action {ind}:")[-1].strip()
             new_action = re.sub(r'^\d+\.\s*', '', new_action)
         elif f"Action:" in agent_response:

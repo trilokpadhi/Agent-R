@@ -133,6 +133,19 @@ class FuncCall:
                 continue
 
 
+
+def env_action(agent_response):
+    """What to hand to env.step().
+
+    AgentGym is given the text after "Action:" (the whole reply when there is none). The ETO server
+    parses "Action:" itself, because Co-Evolving decides between an explicit format error and a
+    silent no-op by whether the marker is present - a distinction that is destroyed by splitting
+    here. See webshop_eto/server.py.
+    """
+    if os.environ.get("TASK") == "webshop" and os.environ.get("WEBSHOP_PROTOCOL", "").lower() == "eto":
+        return agent_response
+    return agent_response.split('Action:')[-1].strip()
+
 def perform_test(calling, env, conv, model_name, idx, max_steps):
     Task = os.environ["TASK"]
     model_type = os.environ["MODEL_TYPE"]
@@ -158,7 +171,7 @@ def perform_test(calling, env, conv, model_name, idx, max_steps):
         current_step += 1
         prompt = conv.to_openai_api_messages()
         agent_response = calling.llm_func(prompt, model_name)
-        new_action = agent_response.split('Action:')[-1].strip()
+        new_action = env_action(agent_response)
         if Task == "sciworld":
             new_action = findValidActionNew([new_action], env, env.get_look_around(), current_recent_actions)
 
@@ -208,7 +221,7 @@ def perform_test_revise(calling, env, conv, model_name, idx, max_steps, content_
     current_recent_actions = []
     for content in content_ls:
         agent_response = content
-        new_action = agent_response.split('Action:')[-1].strip()
+        new_action = env_action(agent_response)
         if Task == "sciworld":
             new_action = findValidActionNew([new_action], env, env.get_look_around(), current_recent_actions)
         step_output = env.step(new_action)
@@ -238,7 +251,7 @@ def perform_test_revise(calling, env, conv, model_name, idx, max_steps, content_
         current_step += 1
         prompt = conv.to_openai_api_messages()
         agent_response = calling.llm_func(prompt, model_name)
-        new_action = agent_response.split('Action:')[-1].strip()
+        new_action = env_action(agent_response)
         if Task == "sciworld":
             new_action = findValidActionNew([new_action], env, env.get_look_around(), current_recent_actions)
         step_output = env.step(new_action)

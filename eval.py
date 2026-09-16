@@ -16,6 +16,7 @@ limitations under the License.
 from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
+from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
 import argparse
 import os
 
@@ -33,6 +34,8 @@ def initialize_environment(Task: str, env_server_base: str, data_len: int = 200)
     Initializes the appropriate environment based on the task type.
     """
     if Task == "webshop":
+        if is_eto():
+            return WebshopEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
         return WebshopEnvClient(env_server_base=env_server_base, data_len=data_len)
     elif Task == "sciworld":
         return SciworldEnvClient(env_server_base=env_server_base, data_len=data_len)
@@ -45,11 +48,8 @@ def setup_conversation(env):
     """
     Sets up the initial conversation for the environment.
     """
-    conversation = list(env.conversation_start)
     conv = get_conversation_template('gpt-4')
-
-    conv.append_message(conv.roles[0], conversation[0]["value"])
-    conv.append_message(conv.roles[1], 'Ok.')
+    replay_conversation_start(conv, env)
     observation = env.observe() if os.environ["TASK"] == "webshop" else env.info["observation"]
     conv.append_message(conv.roles[0], observation)
     return conv
@@ -62,11 +62,16 @@ def main(Task: str, model_name: str, env_server_base: str, max_steps: int):
     env = initialize_environment(Task, env_server_base)
 
     # Load task indices (test_id/ is not shipped; the ids live under mcts_utils/<task>/)
-    test_file = f"test_id/{Task}_test.json"
-    if not os.path.exists(test_file):
-        test_file = f"mcts_utils/{Task}/{Task}_test.json"
-    temp = read_json(test_file)
-    task_inds = [ind["item_id"].replace(f"{Task}_", "") for ind in temp]
+    if Task == "webshop" and is_eto():
+        # ETO addresses tasks by WebShop session id; the 200 ids are a different set from
+        # AgentGym's (the two overlap by 3), so the split file has to come from ETO.
+        task_inds = [str(i) for i in load_split("test")]
+    else:
+        test_file = f"test_id/{Task}_test.json"
+        if not os.path.exists(test_file):
+            test_file = f"mcts_utils/{Task}/{Task}_test.json"
+        temp = read_json(test_file)
+        task_inds = [ind["item_id"].replace(f"{Task}_", "") for ind in temp]
     if "TASK_LIMIT" in os.environ:
         task_inds = task_inds[:int(os.environ["TASK_LIMIT"])]
 

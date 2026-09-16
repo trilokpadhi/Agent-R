@@ -1,0 +1,147 @@
+# PILOT B - option 2: SEVERAL in-process vLLM engines on one GPU (the authors' exact code
+# path, just multiple copies). Each process loads its own weights, so memory limits the count.
+#
+# Sampling is unchanged; VLLM_GPU_MEMORY_UTILIZATION splits the card between the engines.
+#
+# Range [438,471): the second half of shard w08's range, which never started.
+#
+# Apply: kubectl apply -n ii400r87 -f k8s/pilot/pilot-b-multi-engine.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pilot-b-multi-engine
+  labels:
+    project: agent-r
+    stage: mcts-pilot
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: mcts-pilot
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      initContainers:
+        - name: webshop-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-webshop/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: JOB_NAME
+              value: pilot-b-multi-engine
+            - name: WORKERS
+              value: "3"
+            - name: SHARD_MIN
+              value: "438"
+            - name: SHARD_MAX
+              value: "471"
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+            - name: MODEL_NAME
+              value: Qwen3.5-9B
+            - name: MODEL_TYPE
+              value: Raw
+            - name: TASK
+              value: webshop
+            - name: MAX_DEPTH
+              value: "20"
+            - name: ITERA
+              value: "8"
+            - name: N_GEN
+              value: "4"
+            - name: TEMP
+              value: "1"
+            - name: MAX_TOKEN_LENGTH
+              value: "8192"
+            - name: MAX_NEW_TOKENS
+              value: "500"
+            - name: VLLM_DTYPE
+              value: bfloat16
+            - name: VLLM_MAX_MODEL_LEN
+              value: "16384"
+            - name: STOP_TOKENS
+              value: ""
+            - name: ENABLE_THINKING
+              value: "0"
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.30"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              nvidia-smi --query-gpu=name --format=csv,noheader
+              python3 -c "import urllib.request; print('webshop server:', urllib.request.urlopen('http://127.0.0.1:36001/', timeout=5).read().decode())"
+
+              RUN_DIR=/data/results/pilot-b-multi-engine
+              mkdir -p "$RUN_DIR" /data/logs
+              cd "$RUN_DIR"
+              ln -sfn /data/src/Agent-R/mcts_utils mcts_utils
+
+              echo "PILOT_B_START $(date -Is) range [$SHARD_MIN,$SHARD_MAX) engines=$WORKERS gpu_frac=$VLLM_GPU_MEMORY_UTILIZATION"
+              START=$(date +%s)
+
+              SPAN=$(( (SHARD_MAX - SHARD_MIN + WORKERS - 1) / WORKERS ))
+              for w in $(seq 0 $((WORKERS - 1))); do
+                LO=$(( SHARD_MIN + w * SPAN ))
+                HI=$(( LO + SPAN )); [ "$HI" -gt "$SHARD_MAX" ] && HI=$SHARD_MAX
+                [ "$LO" -ge "$SHARD_MAX" ] && continue
+                echo "engine $w -> [$LO,$HI)"
+                python3 /data/src/Agent-R/mcts_collection.py \
+                  --env_server_base http://127.0.0.1:36001 \
+                  --model_name "$MODEL_NAME" \
+                  --min "$LO" --max "$HI" >> "/data/logs/$JOB_NAME.log" 2>&1 &
+                sleep 20   # stagger engine start-up so weight loading does not thrash
+              done
+              wait
+
+              END=$(date +%s)
+              N=$(ls mcts_result/webshop/$MODEL_NAME/ 2>/dev/null | wc -l)
+              G=$(grep -c "###RAW TEXT:" /data/logs/$JOB_NAME.log 2>/dev/null || echo 0)
+              echo "PILOT_B_RESULT elapsed_s=$((END-START)) tasks=$N generations=$G"
+              echo PILOT_B_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

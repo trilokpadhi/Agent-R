@@ -36,34 +36,41 @@ spec:
               python -V; java -version 2>&1 | head -1
 
               SRC=/data/src/webshop-eto
-              # Co-Evolving's own WebShop source: it carries their RNG-injection patches
-              # (generate_product_prices(rng=), load_products(product_price_rng=), get_goals(price_cap_rng=))
-              # and the manifest support that freezes product prices. Pinned to the commit we read.
-              if [ ! -d "$SRC/.git" ]; then
-                rm -rf "$SRC.tmp"
-                git clone --no-checkout https://github.com/YeonsungJung/Co-Evolving-Agents.git "$SRC.tmp"
-                git -C "$SRC.tmp" checkout cc43f24
-                mv "$SRC.tmp" "$SRC"
-              fi
-              git -C "$SRC" rev-parse HEAD
-
+              # Co-Evolving's own WebShop source (commit cc43f24) is uploaded from the Mac rather than
+              # cloned: pods cannot reach github.com ("could not read Username for 'https://github.com'").
+              # It carries their RNG-injection patches - generate_product_prices(rng=),
+              # load_products(product_price_rng=), get_goals(price_cap_rng=) - and manifest support.
               WS="$SRC/envs/webshop"
+              test -f "$WS/src/webshop/web_agent_site/envs/web_agent_text_env.py" \
+                || { echo "BUILD_FAILED: source tree missing at $WS; upload it first"; exit 1; }
               cd "$WS"
               # Path layout the package hard-codes (web_agent_site/utils.py):
               #   BASE_DIR              = envs/webshop/src
               #   DEFAULT_FILE_PATH     = envs/webshop/data/items_shuffle.json
               #   search index          = envs/webshop/search_index/indexes
               pip install --no-input gdown
+              # Fail fast and loudly if Drive is unreachable: github.com already is.
+              python - <<'PY'
+              import urllib.request, sys
+              try:
+                  code = urllib.request.urlopen("https://drive.google.com", timeout=20).status
+                  print("drive.google.com reachable:", code)
+              except Exception as e:
+                  sys.exit(f"BUILD_FAILED: cannot reach drive.google.com from this pod: {type(e).__name__}: {e}")
+              PY
 
+              # The miniforge image has no `unzip`; use Python's zipfile module instead.
               if [ ! -f data/items_shuffle.json ]; then
-                echo "== downloading products (data.zip)"
-                gdown "https://drive.google.com/uc?id=1G_0ccLWn5kZE5rpeyAdh_YuoNzvBUjT9" -O data.zip
-                unzip -o -q data.zip && rm -f data.zip
+                [ -f data.zip ] || { echo "== downloading products (data.zip)"
+                  gdown "https://drive.google.com/uc?id=1G_0ccLWn5kZE5rpeyAdh_YuoNzvBUjT9" -O data.zip; }
+                echo "== extracting data.zip"
+                python -m zipfile -e data.zip . && rm -f data.zip
               fi
               if [ ! -d search_index/indexes ]; then
-                echo "== downloading prebuilt Lucene index (indexes.zip)"
-                gdown "https://drive.google.com/uc?id=11zOUDkJSgGhYin9NxQtG8PVpDsika86y" -O indexes.zip
-                mkdir -p search_index && unzip -o -q indexes.zip -d search_index/ && rm -f indexes.zip
+                [ -f indexes.zip ] || { echo "== downloading prebuilt Lucene index (indexes.zip)"
+                  gdown "https://drive.google.com/uc?id=11zOUDkJSgGhYin9NxQtG8PVpDsika86y" -O indexes.zip; }
+                echo "== extracting indexes.zip"
+                mkdir -p search_index && python -m zipfile -e indexes.zip search_index/ && rm -f indexes.zip
               fi
               du -sh data search_index; ls data search_index
 

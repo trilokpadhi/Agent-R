@@ -1,0 +1,124 @@
+# CPU-only Job: check the Agent-R maintainers' AgentGym SciWorld code without a GPU.
+#   /data/src/AgentGym-agentr   copy of agentenv + agentenv-sciworld with the files posted in
+#                               Agent-R issues #5/#8 (patches/agent-r-maintainer-agentgym);
+#                               upstream /data/src/AgentGym is left unchanged
+#   sidecar  SciWorld server imported from the copy (cwd import; the conda env's editable
+#            install still points at the upstream checkout, so the origin is asserted)
+#   client   vLLM image (Python 3.12, needed by agentenv) with the copy's agentenv client
+# Checks reset, get_look_around, get_inventory, get_valid_action_object_combinations,
+# Agent-R's findValidActionNew, a bare-action step, and get_game_nums.
+# Apply: kubectl apply -n ii400r87 -f k8s/sciworld-api-test.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sciworld-api-test-002
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: sciworld-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-sciworld
+              cd /data/src/AgentGym-agentr/agentenv-sciworld
+              python -c "import importlib.util, sys; o = importlib.util.find_spec('agentenv_sciworld').origin; print('agentenv_sciworld from', o); sys.exit(0 if o.startswith('/data/src/AgentGym-agentr/') else 1)"
+              exec python -c "import uvicorn; uvicorn.run('agentenv_sciworld:app', host='127.0.0.1', port=36001)"
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-sciworld/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: client
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym-agentr/agentenv:/data/envs/policy-site
+            - name: TASK
+              value: sciworld
+            - name: MAX_DEPTH
+              value: "1"
+            - name: ITERA
+              value: "1"
+            - name: N_GEN
+              value: "1"
+            - name: MODEL_TYPE
+              value: check
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              cat > /tmp/sciworld_api_test.py <<'EOF'
+              import json
+
+              import agentenv
+              print("agentenv from", agentenv.__file__)
+              assert agentenv.__file__.startswith("/data/src/AgentGym-agentr/"), "wrong agentenv copy"
+
+              from agentenv.envs import SciworldEnvClient
+              from mcts_utils.sciworld.eval_utils_sw import findValidActionNew
+
+              env = SciworldEnvClient(env_server_base="http://127.0.0.1:36001", data_len=200)
+              test_items = json.load(open("/data/src/Agent-R/mcts_utils/sciworld/sciworld_test.json"))
+              ids = [int(item["item_id"].replace("sciworld_", "")) for item in test_items]
+              idx = ids[0]
+
+              r = env.reset(idx)
+              print("reset:", {k: r.get(k) for k in ("task_name", "var_num", "error")})
+              print("info['observation']:", env.info["observation"][:500])
+              print("conversation_start[0] starts:", env.conversation_start[0]["value"][:80])
+
+              look = env.get_look_around()
+              print("get_look_around():", look[:500])
+              assert look, "empty look_around"
+              inventory = env.get_inventory()
+              print("get_inventory():", inventory[:300])
+              valid = env.get_valid_action_object_combinations()
+              print("get_valid_action_object_combinations():", type(valid).__name__, len(valid), "e.g.", list(valid)[:8])
+              assert isinstance(valid, list) and valid, "no valid action/object combinations"
+
+              action = findValidActionNew(["open door to kitchen"], env, look, [])
+              print("findValidActionNew(['open door to kitchen']) ->", repr(action))
+              out = env.step(action)
+              print("step(action):", repr(out.state[:300]), "reward:", out.reward, "done:", out.done)
+              assert out.state.strip(), "empty observation after step"
+
+              game_nums, task_inds = env.get_game_nums()
+              print("get_game_nums(): total games:", game_nums, "| task keys:", len(task_inds))
+              print("  non-empty task keys:", sorted((k for k, v in task_inds.items() if v), key=int))
+              owner = [k for k, v in task_inds.items() if idx in v]
+              print(f"  test id {idx} belongs to task key(s): {owner}")
+              split = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 0]
+              missing = [n for n in split if not task_inds.get(str(n))]
+              print("  maintainer training split task_nums with no games:", missing)
+              print("SCIWORLD_API_TEST_PASSED")
+              EOF
+              python3 /tmp/sciworld_api_test.py
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

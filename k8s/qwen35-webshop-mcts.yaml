@@ -1,0 +1,172 @@
+# One-H100 Job: Agent-R MCTS trajectory collection for Qwen3.5-9B on WebShop, iteration 1,
+# with the paper's settings: ITERA=8 rollouts, MAX_DEPTH=20, N_GEN=4 candidates, c_uct=0.25
+# (mcts_raw default), TEMP=1 for expansion, MAX_TOKEN_LENGTH=8192 (maintainer, issue #8).
+#
+# Design proven by pilot A (Sep 13): ONE vLLM OpenAI server per GPU and WORKERS=6 Agent-R
+# processes over disjoint id slices, so the server batches their requests. Measured 6.4 tasks
+# per GPU-hour versus 2.5 for one in-process engine (2.6x). Sampling is unchanged; only the
+# transport differs (llm_server.py VLLM_API_BASE branch).
+#
+# Sharding: mcts_collection.py iterates range(1000)[min:max] and skips test ids and ids missing
+# from webshop_train_clean.json. --min 0 --max 471 covers the first 300 usable ids.
+# All shards write to one directory; ids that already have a result file are skipped, so a
+# shard can be resubmitted after a failure.
+#
+# Output: /data/results/mcts-iter1-webshop/mcts_result/webshop/Qwen3.5-9B/search_results_<id>.json
+# Submit all shards with: k8s/submit-mcts.sh webshop
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-webshop-mcts-it1-s000
+  labels:
+    project: agent-r
+    stage: mcts-iter1
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: mcts-iter1
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      initContainers:
+        - name: webshop-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-webshop/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: JOB_NAME
+              value: qwen35-webshop-mcts-it1-s000
+            - name: SHARD_MIN
+              value: "0"
+            - name: SHARD_MAX
+              value: "6"
+            - name: WORKERS
+              value: "6"
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+            - name: MODEL_NAME
+              value: Qwen3.5-9B
+            - name: MODEL_TYPE
+              value: Raw
+            - name: TASK
+              value: webshop
+            - name: MAX_DEPTH
+              value: "20"
+            - name: ITERA
+              value: "8"
+            - name: N_GEN
+              value: "4"
+            - name: TEMP
+              value: "1"
+            - name: MAX_TOKEN_LENGTH
+              value: "8192"
+            - name: MAX_NEW_TOKENS
+              value: "500"
+            - name: VLLM_DTYPE
+              value: bfloat16
+            - name: VLLM_MAX_MODEL_LEN
+              value: "16384"
+            - name: STOP_TOKENS
+              value: ""
+            - name: ENABLE_THINKING
+              value: "0"
+            - name: VLLM_API_BASE
+              value: http://127.0.0.1:8000/v1
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+              python3 -c "import urllib.request; print('webshop server:', urllib.request.urlopen('http://127.0.0.1:36001/', timeout=5).read().decode())"
+
+              RUN_DIR=/data/results/mcts-iter1-webshop
+              mkdir -p "$RUN_DIR" /data/logs
+              cd "$RUN_DIR"
+              ln -sfn /data/src/Agent-R/mcts_utils mcts_utils
+
+              echo "== starting one vLLM server for $WORKERS workers"
+              python3 -m vllm.entrypoints.openai.api_server \
+                --model "$MODEL_DIR" \
+                --dtype "$VLLM_DTYPE" \
+                --max-model-len "$VLLM_MAX_MODEL_LEN" \
+                --gpu-memory-utilization 0.90 \
+                --port 8000 > "/data/logs/$JOB_NAME-vllm.log" 2>&1 &
+              VLLM_PID=$!
+              for i in $(seq 1 120); do
+                if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" 2>/dev/null; then
+                  echo "vLLM server ready after ${i}0s"; break
+                fi
+                if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+                  echo "MCTS_FAILED: vLLM server died"; tail -30 "/data/logs/$JOB_NAME-vllm.log"; exit 1
+                fi
+                sleep 10
+              done
+
+              echo "START $(date -Is) shard [$SHARD_MIN,$SHARD_MAX) workers=$WORKERS"
+              SPAN=$(( (SHARD_MAX - SHARD_MIN + WORKERS - 1) / WORKERS ))
+              WORKER_PIDS=()
+              for w in $(seq 0 $((WORKERS - 1))); do
+                LO=$(( SHARD_MIN + w * SPAN ))
+                HI=$(( LO + SPAN )); [ "$HI" -gt "$SHARD_MAX" ] && HI=$SHARD_MAX
+                [ "$LO" -ge "$SHARD_MAX" ] && continue
+                echo "worker $w -> [$LO,$HI)"
+                python3 /data/src/Agent-R/mcts_collection.py \
+                  --env_server_base http://127.0.0.1:36001 \
+                  --model_name "$MODEL_NAME" \
+                  --min "$LO" --max "$HI" >> "/data/logs/$JOB_NAME.log" 2>&1 &
+                WORKER_PIDS+=($!)
+              done
+              wait "${WORKER_PIDS[@]}"
+
+              kill "$VLLM_PID" 2>/dev/null
+              echo "END $(date -Is) result files in shared dir: $(ls mcts_result/webshop/$MODEL_NAME 2>/dev/null | wc -l)"
+              echo QWEN_WEBSHOP_MCTS_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

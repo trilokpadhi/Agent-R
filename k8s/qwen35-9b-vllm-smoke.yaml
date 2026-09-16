@@ -1,0 +1,118 @@
+# One-H100 Job: load Qwen3.5-9B from the PVC cache with in-process vLLM, the same
+# way Agent-R's mcts_utils/llm_server.py does (LLM(...) + llm.chat(...)), and check
+# whether the chat template emits thinking text before "Action:".
+# Run qwen35-9b-download.yaml to completion first.
+#
+# Run 001 failed with "Cannot re-initialize CUDA in forked subprocess": this vLLM
+# build forks its EngineCore after CUDA is already initialized in the parent. Fix:
+# VLLM_WORKER_MULTIPROC_METHOD=spawn, and run the script from a file with a
+# __main__ guard (spawn re-imports __main__, which is impossible for `python -`).
+# Agent-R's eval.py / mcts_collection.py need the same environment variable.
+#
+# Run 002 then showed the real root cause, CUDA "Error 803: unsupported display driver /
+# cuda driver combination". The image registers a CUDA 12.9 forward-compat libcuda
+# (575.57.08) via /etc/ld.so.conf.d/cuda-compat.conf, ahead of the host driver's libcuda
+# (590.48.01). vllm-cuda-diagnose-001 confirmed torch.cuda works once the host libcuda is
+# used, so the container drops that ld.so.conf entry and re-runs ldconfig before starting.
+#
+# Apply: kubectl apply -n ii400r87 -f k8s/qwen35-9b-vllm-smoke.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-9b-vllm-smoke-003
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: MODEL_ID
+              value: Qwen/Qwen3.5-9B
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /data/logs
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              echo "libcuda.so.1 now resolves to:"; ldconfig -p | grep 'libcuda.so.1 '
+              nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+              cat > /tmp/qwen_smoke.py <<'EOF'
+              import os
+              import time
+
+
+              def main():
+                  import torch
+                  import transformers
+                  import vllm
+                  from huggingface_hub import snapshot_download
+                  from vllm import LLM, SamplingParams
+
+                  print("vllm", vllm.__version__, "| torch", torch.__version__, "| transformers", transformers.__version__)
+                  print("VLLM_WORKER_MULTIPROC_METHOD:", os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"))
+                  model_dir = snapshot_download(os.environ["MODEL_ID"], local_files_only=True)
+                  print("MODEL_DIR:", model_dir)
+
+                  t0 = time.time()
+                  llm = LLM(model=model_dir, dtype="bfloat16", max_model_len=16384, gpu_memory_utilization=0.90)
+                  print(f"LOAD_SECONDS: {time.time() - t0:.1f}")
+                  print("EOS_TOKEN:", llm.get_tokenizer().eos_token)
+
+                  messages = [
+                      {"role": "system", "content": "You are a helpful assistant."},
+                      {"role": "user", "content": (
+                          "You are shopping on WebShop. Instruction: find AA batteries, pack of 8, under 10 dollars.\n"
+                          "Reply in exactly this format:\nThought: <one sentence>\nAction: search[<query>]"
+                      )},
+                  ]
+                  params = SamplingParams(temperature=0.0, max_tokens=500)
+
+                  for label, kwargs in [
+                      ("default_template", {}),
+                      ("enable_thinking_false", {"chat_template_kwargs": {"enable_thinking": False}}),
+                  ]:
+                      try:
+                          t = time.time()
+                          out = llm.chat(messages, sampling_params=params, **kwargs)[0].outputs[0]
+                      except Exception as e:
+                          print(f"===== {label}: FAILED {type(e).__name__}: {e}")
+                          continue
+                      print(f"===== {label} (finish_reason={out.finish_reason}, tokens={len(out.token_ids)}, {time.time() - t:.1f}s) =====")
+                      print(out.text)
+                      print("CONTAINS_THINK_TAG:", "<think>" in out.text or "</think>" in out.text)
+                      print("PARSED_ACTION:", out.text.split("Action:")[-1].strip())
+
+                  print("QWEN_VLLM_SMOKE_PASSED")
+
+
+              if __name__ == "__main__":
+                  main()
+              EOF
+              python3 /tmp/qwen_smoke.py 2>&1 | tee -a /data/logs/qwen35-9b-vllm-smoke-003.log
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

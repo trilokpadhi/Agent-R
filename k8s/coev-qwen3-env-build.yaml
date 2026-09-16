@@ -1,0 +1,93 @@
+# CPU-only Job: build the Co-Evolving-Agents Qwen3.5 training environment onto the PVC.
+#
+# Uses the user's own environment_qwen3.yml verbatim (transformers 4.56.1, torch 2.6.0+cu126,
+# flash-attn 2.8.3, Python 3.10) so the fine-tuning stack is the one already adapted for
+# Qwen3.5 - no versions are chosen here.
+#
+# No GPU is requested: this must not compete with the MCTS shards.
+#
+# Apply: kubectl apply -n ii400r87 -f k8s/coev-qwen3-env-build.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: coev-qwen3-env-build-001
+  labels:
+    project: agent-r
+    stage: train-env
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+        stage: train-env
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: builder
+          image: condaforge/miniforge3:24.3.0-0
+          env:
+            - name: ENV_PREFIX
+              value: /data/envs/agents-qwen3
+            - name: REPO
+              value: /data/src/Co-Evolving-Agents
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              LOG=/data/logs/coev-qwen3-env-build-001.log
+              mkdir -p /data/logs /data/envs
+              exec > >(tee -a "$LOG") 2>&1
+              echo "START $(date -Is)"
+              df -h /data | tail -1
+
+              echo "== building $ENV_PREFIX from the repo's own environment_qwen3.yml"
+              conda env create -p "$ENV_PREFIX" -f "$REPO/environment_qwen3.yml"
+              CREATE_RC=$?
+              echo "conda env create exit=$CREATE_RC"
+              if [ "$CREATE_RC" -ne 0 ]; then
+                echo "ENV_BUILD_FAILED: see the pip error above; flash-attn often needs"
+                echo "  pip install flash-attn==2.8.3 --no-build-isolation  (same version, build flag only)"
+                exit 1
+              fi
+
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate "$ENV_PREFIX"
+
+              echo "== versions actually installed"
+              python -c "import sys, torch, transformers; print('python', sys.version.split()[0]); print('torch', torch.__version__); print('transformers', transformers.__version__)"
+
+              echo "== does this transformers understand the Qwen3.5 checkpoint?"
+              python - <<'PY'
+              import os, transformers
+              from transformers import AutoConfig
+              cfg = AutoConfig.from_pretrained(os.environ["MODEL_DIR"])
+              print("config class:", type(cfg).__name__, "model_type:", getattr(cfg, "model_type", None))
+              text = cfg.get_text_config() if hasattr(cfg, "get_text_config") else getattr(cfg, "text_config", cfg)
+              print("text model_type:", getattr(text, "model_type", None))
+              print("max_position_embeddings:", getattr(text, "max_position_embeddings", None))
+              from transformers import AutoModelForCausalLM
+              print("AutoModelForCausalLM maps to:", type(AutoModelForCausalLM._model_mapping[type(cfg)]).__name__
+                    if type(cfg) in AutoModelForCausalLM._model_mapping else "NOT MAPPED")
+              PY
+
+              echo "== the repo's own Qwen3.5 tests"
+              cd "$REPO"
+              PYTHONPATH="$REPO" python -m unittest tests.test_qwen35_runtime -v 2>&1 | tail -25
+
+              echo "== env size"
+              du -sh "$ENV_PREFIX"
+              df -h /data | tail -1
+              echo "END $(date -Is)"
+              echo COEV_QWEN3_ENV_BUILD_DONE
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

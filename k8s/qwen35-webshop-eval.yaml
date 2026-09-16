@@ -1,0 +1,149 @@
+# One-H100 Job: Qwen3.5-9B + Agent-R eval.py on WebShop (TASK_LIMIT items, default 1).
+#
+# Pod layout
+#   initContainers/webshop-server  native sidecar (restartPolicy: Always, Kubernetes >= 1.29;
+#                                  cluster is v1.32). Listens on 127.0.0.1:36001 only. Its
+#                                  startupProbe gates the policy container, and the kubelet
+#                                  stops it after the policy container exits, so the Job
+#                                  completes on its own.
+#   containers/policy              vLLM image + Agent-R from /data/src (PYTHONPATH), deps from
+#                                  /data/envs/policy-site (k8s/policy-deps-build.yaml).
+#
+# Requirements discovered on this cluster (see .claude/CLAUDE.md):
+#   - drop the image's cuda-compat ld.so.conf entry (CUDA Error 803 otherwise)
+#   - VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - ENABLE_THINKING=0 (Qwen3.5's default template emits a long plain-text reasoning block)
+#
+# Results: /data/results/<job-name>/test_result/webshop/Qwen3.5-9B_Raw/search_results_<id>.json
+# Apply: kubectl apply -n ii400r87 -f k8s/qwen35-webshop-eval.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-webshop-eval-002
+  labels:
+    project: agent-r
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 5400
+  ttlSecondsAfterFinished: 259200
+  template:
+    metadata:
+      labels:
+        project: agent-r
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: webshop-server
+          image: condaforge/miniforge3:24.3.0-0
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/AgentGym/agentenv-webshop/webshop
+              exec webshop --host 127.0.0.1 --port 36001
+          startupProbe:
+            exec:
+              command:
+                - /data/envs/agentenv-webshop/bin/python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: policy
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          env:
+            - name: JOB_NAME
+              value: qwen35-webshop-eval-002
+            - name: HF_HOME
+              value: /data/models/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: PYTHONPATH
+              value: /data/src/Agent-R:/data/src/AgentGym/agentenv:/data/envs/policy-site
+            - name: MODEL_DIR
+              value: /data/models/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+            - name: MODEL_NAME
+              value: Qwen3.5-9B
+            - name: MODEL_TYPE
+              value: Raw
+            - name: TASK
+              value: webshop
+            - name: TASK_LIMIT
+              value: "1"
+            # mcts_utils/webshop/mcts_ws.py reads these at import time (run 001 failed with
+            # KeyError: 'MAX_DEPTH'); eval.py does not use them.
+            - name: MAX_DEPTH
+              value: "1"
+            - name: ITERA
+              value: "1"
+            - name: N_GEN
+              value: "1"
+            - name: TEMP
+              value: "0"
+            - name: MAX_TOKEN_LENGTH
+              value: "7000"
+            - name: MAX_NEW_TOKENS
+              value: "500"
+            - name: VLLM_DTYPE
+              value: bfloat16
+            - name: VLLM_MAX_MODEL_LEN
+              value: "16384"
+            - name: STOP_TOKENS
+              value: ""
+            - name: ENABLE_THINKING
+              value: "0"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf
+              ldconfig
+              nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+
+              python3 -c "import urllib.request; print('webshop server:', urllib.request.urlopen('http://127.0.0.1:36001/', timeout=5).read().decode())"
+
+              RUN_DIR="/data/results/$JOB_NAME"
+              mkdir -p "$RUN_DIR" /data/logs
+              cd "$RUN_DIR"
+              ln -sfn /data/src/Agent-R/mcts_utils mcts_utils
+              echo "START $(date -Is) in $RUN_DIR"
+
+              python3 /data/src/Agent-R/eval.py \
+                --env_server_base http://127.0.0.1:36001 \
+                --model_name "$MODEL_NAME" \
+                --max_steps 30 2>&1 | tee -a "/data/logs/$JOB_NAME.log"
+
+              echo "== results"
+              python3 - <<'EOF'
+              import glob, json, os
+              files = sorted(glob.glob(f"test_result/{os.environ['TASK']}/{os.environ['MODEL_NAME']}_{os.environ['MODEL_TYPE']}/search_results_*.json"))
+              scores = []
+              for path in files:
+                  d = json.load(open(path))
+                  scores.append(d["env_score"])
+                  print(f"{path}: env_score={d['env_score']} steps={d['step_num']}")
+                  for m in d["state"][-6:]:
+                      print(f"  [{m['role']}] {str(m['content'])[:300]}")
+              print(f"ITEMS={len(scores)} MEAN_SCORE={sum(scores) / len(scores) if scores else 'n/a'}")
+              EOF
+              echo "END $(date -Is)"
+              echo QWEN_WEBSHOP_EVAL_DONE
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tpadhi1

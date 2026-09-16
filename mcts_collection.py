@@ -16,6 +16,7 @@ limitations under the License.
 from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
+from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
 import argparse
 import os
 
@@ -29,6 +30,8 @@ elif Task == "textcraft":
     from mcts_utils.textcraft.mcts_tc import *
 
 def initialize_environment_webshop(env_server_base: str, data_len: int):
+    if is_eto():
+        return WebshopEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
     return WebshopEnvClient(
         env_server_base=env_server_base,
         data_len=data_len,
@@ -47,11 +50,8 @@ def initialize_environment_textcraft(env_server_base: str, data_len: int):
     )
 
 def setup_conversation(env):
-    conversation = list(env.conversation_start)
     conv = get_conversation_template('gpt-4')
-
-    conv.append_message(conv.roles[0], conversation[0]["value"])
-    conv.append_message(conv.roles[1], 'Ok.')
+    replay_conversation_start(conv, env)
     if os.environ["TASK"] == "webshop":
         conv.append_message(conv.roles[0], env.observe())
     else:
@@ -89,6 +89,10 @@ def load_task_data(Task):
     """
     Loads test and training data for the given task.
     """
+    if Task == "webshop" and is_eto():
+        # ETO ids, not AgentGym's: train_indices.json (1,824) and test_indices.json (200).
+        # train_data is a membership set here, matching how process_task uses it.
+        return [str(i) for i in load_split("test")], {str(i): True for i in load_split("train")}
     test_data = read_json(f"mcts_utils/{Task}/{Task}_test.json")
     train_data = read_json(f"mcts_utils/{Task}/{Task}_train_clean.json")
     task_inds = [ind["item_id"].replace(f"{Task}_", "") for ind in test_data]
@@ -98,7 +102,10 @@ def process_task(Task, task_inds, train_data, model_name, env, calling, min, max
     """
     Processes tasks for "webshop" and "textcraft".
     """
-    train_ids = [i for i in range(1000)][min:max]
+    # Released code walks range(1000) and skips ids that are not usable; the ETO split is an
+    # explicit id list, so slice that instead.
+    train_ids = (load_split("train") if (Task == "webshop" and is_eto())
+                 else [i for i in range(1000)])[min:max]
     for idx in train_ids:
         if str(idx) in task_inds or str(idx) not in train_data:
             continue
