@@ -85,16 +85,14 @@ sft_data:
 sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms-swift
   epochs: [3, 1, 1]            # paper
   continue_from_previous: true # user decision: iterations 2-3 fine-tune the previous checkpoint
-  max_length: 16384            # DEVIATION from paper C.1 ("a sequence length of 8,196"), deliberate:
-                               # 20480 OOMed on 7xH100 (54 GiB allocated + 12.7 GiB lost to fragmentation,
-                               # 11 GiB alloc failed). Measured revision rows after the ICL strip: p99 about
-                               # 15.2k tokens, so 16384 truncates roughly 1% against 8196's 18.8%.
-                               # our revision rows measure 4,297-19,651 tokens, median 9,896, so 8,196 with
-                               # truncation_strategy 'right' deleted the tail - the good continuation and the
-                               # Buy Now - from more than half of every training example. 20480 covers the
-                               # measured maximum. The authors' Llama-3.1 trajectories fit in 8,196; Qwen3.5's
-                               # do not. Reproducing the number is not the same as reproducing the truncation.
-  truncation_strategy: right   # XTuner truncates; ms-swift's default 'delete' would drop long samples
+  max_length: 12288            # DEVIATION from paper C.1's 8,196, and below our measured p99 (20,776):
+                               # 16384 OOMed twice on 7xH100 during backward (64.3 GiB allocated, a 12.66 GiB
+                               # allocation failed) once a max-length row reached the backward pass.
+                               # Real token stats over train.jsonl: median 2,879, mean 4,507, p90 9,991.
+  truncation_strategy: delete  # DROP rows over max_length rather than cut their tail. Truncation removes
+                               # the recovery and the Buy Now - the exact defect that produced 17.08 - while
+                               # 'delete' only removes about 5% of candidates from a pool of 141,548 we
+                               # sample 5,500 from, so every surviving example stays complete.
   learning_rate: 2.0e-5        # paper C.1
   warmup_ratio: 0.03           # paper C.1: 3% warm-up, cosine scheduler
   weight_decay: 0              # paper C.1: AdamW, weight decay 0
