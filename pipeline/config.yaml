@@ -104,11 +104,12 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
   dtype: bfloat16              # user decision (XTuner uses fp16)
   global_batch: 112            # paper C.1: batch 1 per device x accumulation 16, on our 7 GPUs (paper: 8 A100-80GB)
   per_device_batch: 1          # paper C.1
-  deepspeed: zero3             # DEVIATION from the Agent-R README's zero2, forced by memory: zero2
-                               # replicates the 18 GB of bf16 parameters on every GPU, leaving too little
-                               # for activations at this sequence length. zero3 shards them (~15 GB/GPU
-                               # freed). The paper used sequence parallelism on 8xA100 for the same reason;
-                               # we have no sequence parallelism, so zero3 is the equivalent lever.
+  deepspeed: zero2             # Agent-R README: --deepspeed deepspeed_zero2.
+                               # zero3 was tried and reverted: it fixed the OOM (42.6 GiB peak) but ran at
+                               # 169 s/step vs 49 s/step previously - 10h for 219 steps - because it
+                               # re-gathers the sharded parameters every layer and NVLink SHARP is off.
+                               # zero2 is viable now that max_length is 16384 (not 20480) and the allocator
+                               # uses expandable segments, which recovered the 12.7 GiB lost to fragmentation.
   packing: false               # required: Qwen3.5 linear attention does not support packing
   loss_scale: default          # all assistant turns get loss, as in the released code (user decision)
 
