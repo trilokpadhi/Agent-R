@@ -26,6 +26,10 @@ spec:
             # with "Failed to bind NVLink SHARP (NVLS) Multicast memory ... CUDA error 401" (seen Sep 15).
             # Disabling it only changes the collective algorithm, not the training math.
             - {name: NCCL_NVLS_ENABLE, value: "0"}
+            # 12.7 GiB was reserved-but-unallocated when the 20480 run OOMed: long, highly variable
+            # sequence lengths fragment the caching allocator badly. Expandable segments let it reuse
+            # those blocks instead of holding them per size class.
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
             - {name: HF_HOME, value: /data/models/huggingface}
             - {name: HF_HUB_OFFLINE, value: "1"}
             - {name: PYTHONUNBUFFERED, value: "1"}

@@ -85,7 +85,10 @@ sft_data:
 sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms-swift
   epochs: [3, 1, 1]            # paper
   continue_from_previous: true # user decision: iterations 2-3 fine-tune the previous checkpoint
-  max_length: 20480            # DEVIATION from paper C.1 ("a sequence length of 8,196"), deliberate:
+  max_length: 16384            # DEVIATION from paper C.1 ("a sequence length of 8,196"), deliberate:
+                               # 20480 OOMed on 7xH100 (54 GiB allocated + 12.7 GiB lost to fragmentation,
+                               # 11 GiB alloc failed). Measured revision rows after the ICL strip: p99 about
+                               # 15.2k tokens, so 16384 truncates roughly 1% against 8196's 18.8%.
                                # our revision rows measure 4,297-19,651 tokens, median 9,896, so 8,196 with
                                # truncation_strategy 'right' deleted the tail - the good continuation and the
                                # Buy Now - from more than half of every training example. 20480 covers the
@@ -101,7 +104,11 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
   dtype: bfloat16              # user decision (XTuner uses fp16)
   global_batch: 112            # paper C.1: batch 1 per device x accumulation 16, on our 7 GPUs (paper: 8 A100-80GB)
   per_device_batch: 1          # paper C.1
-  deepspeed: zero2             # Agent-R README: --deepspeed deepspeed_zero2
+  deepspeed: zero3             # DEVIATION from the Agent-R README's zero2, forced by memory: zero2
+                               # replicates the 18 GB of bf16 parameters on every GPU, leaving too little
+                               # for activations at this sequence length. zero3 shards them (~15 GB/GPU
+                               # freed). The paper used sequence parallelism on 8xA100 for the same reason;
+                               # we have no sequence parallelism, so zero3 is the equivalent lever.
   packing: false               # required: Qwen3.5 linear attention does not support packing
   loss_scale: default          # all assistant turns get loss, as in the released code (user decision)
 
