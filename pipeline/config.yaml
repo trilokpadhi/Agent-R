@@ -35,6 +35,11 @@ model:
 environments:                  # prebuilt on the PVC; SciWorld uses the maintainers' AgentGym files (issues #5, #8)
   webshop:
     agentenv: /data/src/AgentGym/agentenv
+    # The in-context example used by the eto protocol. It stays in the prompt at collection and
+    # eval; step_sft_data removes it from training rows, because ETO's own SFT data has only
+    # instruction + "OK" before the task (verified against data/webshop_sft.json: 2 identical
+    # leading turns across 1,824 rows).
+    icl_path: /data/src/webshop-eto/eval_agent/prompt/icl_examples/webshop_icl.json
   sciworld:
     agentenv: /data/src/AgentGym-agentr/agentenv
 

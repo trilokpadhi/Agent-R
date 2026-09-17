@@ -328,6 +328,31 @@ class Pipeline:
             return None
         return out
 
+    def strip_icl(self, task, messages):
+        """Drop the in-context example from a TRAINING row, keeping it in the prompt.
+
+        Collection and evaluation use Co-Evolving's few-shot prompt (instruction, "OK", then one
+        worked example), so every revise_log/high_log begins with the same 8 ICL messages. Their
+        SFT data does not: ETO's data/webshop_sft.json has exactly 2 identical leading turns across
+        all 1,824 rows -- instruction and "OK" -- then the real task (verified by download, and by
+        webshop_protocol.replay_expert_dataset keeping row["conversations"][:2]).
+
+        Training on the ICL turns would make one fixed demonstration a target in every row, which is
+        both a departure from their protocol and a strong memorisation signal. `pred_traj_offset`
+        does not apply here: by its own comment it governs the preference dataset, not SFT.
+        """
+        if task != "webshop" or self.cfg["webshop_protocol"] != "eto" or not messages:
+            return messages
+        icl = json.loads(Path(self.cfg["environments"]["webshop"]["icl_path"]).read_text())
+        n = len(icl[0])                      # 8 messages: 4 observation/action pairs
+        head = 3 if messages[0]["role"] == "system" else 2   # system?, instruction, "OK"
+        if len(messages) <= head + n:
+            return None
+        if messages[head]["content"].strip() not in icl[0][0]["content"].strip():
+            raise RuntimeError(f"expected the ICL example at index {head}, found: "
+                               f"{messages[head]['content'][:120]!r}")
+        return messages[:head] + messages[head + n:]
+
     def step_sft_data(self, iteration):
         step_dir = self.root / f"iter{iteration}" / "sft-data"
         data_path = step_dir / "train.jsonl"
@@ -343,7 +368,7 @@ class Pipeline:
             for path in sorted((self.root / f"iter{iteration}" / f"revise-{task}").glob("shard*/out/*/*_centric.jsonl")):
                 for line in open(path):
                     row = json.loads(line)
-                    conv = self.clean_conversation(row["revise_log"])
+                    conv = self.strip_icl(task, self.clean_conversation(row["revise_log"]))
                     if conv:
                         revise.append(conv)
                     else:
@@ -352,7 +377,7 @@ class Pipeline:
                     if key in seen:
                         continue  # one good path is paired with many bad ones; keep it once
                     seen.add(key)
-                    high = self.clean_conversation(row["high_log"])
+                    high = self.strip_icl(task, self.clean_conversation(row["high_log"]))
                     if high:
                         good.append(high)
                     else:

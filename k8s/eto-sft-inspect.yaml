@@ -1,0 +1,67 @@
+# Settle empirically what ETO's golden SFT file actually contains: does data/webshop_sft.json
+# carry the in-context example, or only instruction + "OK" + the task? This decides whether our
+# revision rows should keep the 8 ICL turns as training targets.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eto-sft-inspect-001
+  labels: {project: agent-r, step: inspect}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, step: inspect}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: inspect
+          image: condaforge/miniforge3:24.3.0-0
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-webshop
+              cd /data/src/webshop-eto
+              if [ ! -f data/webshop_sft.json ]; then
+                [ -f ETO_data.zip ] || gdown "https://drive.google.com/uc?id=1YbhbL8RhQGDWFv5y6k1qgwRqSyFFsao8" -O ETO_data.zip
+                python -m zipfile -e ETO_data.zip . && rm -f ETO_data.zip
+              fi
+              ls -la data/*.json
+              python - <<'PY'
+              import json, hashlib
+              rows = json.load(open("data/webshop_sft.json"))
+              print(f"rows: {len(rows)}")
+              r = rows[0]
+              print("keys:", list(r.keys()))
+              conv = r["conversations"]
+              print(f"\nfirst row id={r.get('id')} turns={len(conv)}")
+              for i, t in enumerate(conv[:8]):
+                  v = t["value"].replace("\n", " ")
+                  print(f"  [{i}] {t['from']:5} {v[:110]}")
+              # How many leading turns are byte-identical across rows? 2 => instruction + OK only.
+              # 10 => instruction + OK + the 8-turn in-context example.
+              for k in range(1, 13):
+                  h = {hashlib.md5(json.dumps(x["conversations"][:k], sort_keys=True).encode()).hexdigest()
+                       for x in rows[:400]}
+                  if len(h) > 1:
+                      print(f"\nidentical leading turns across 400 rows: {k-1}")
+                      break
+              n_assist = sum(1 for t in conv if t["from"] == "gpt")
+              print(f"assistant turns in row 0: {n_assist}")
+              print("contains the ICL product (l'eau d'issey) anywhere:",
+                    any("issey" in t["value"].lower() for t in conv))
+              hits = sum(1 for x in rows if any("issey" in t["value"].lower() for t in x["conversations"]))
+              print(f"rows mentioning l'eau d'issey: {hits}/{len(rows)}")
+              PY
+              echo "ETO_SFT_INSPECT_DONE"
+          resources:
+            requests: {cpu: "1", memory: 4Gi}
+            limits: {cpu: "2", memory: 16Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
