@@ -18,10 +18,12 @@ for iteration in 1..3:
 ## Run
 
 ```bash
-pipeline/deploy.sh pipeline/config-smoke.yaml   # tiny end-to-end check first
 pipeline/deploy.sh pipeline/config.yaml         # the real run
-kubectl logs -n ii400r87 -f job/agr-q35v1-controller
+kubectl logs -n ii400r87 -f job/agr-$(grep '^run:' pipeline/config.yaml | awk '{print $2}')-controller
 ```
+
+**Step-by-step, including the SSH tunnel, sign-in, resuming after a failure, and how many
+processes actually run per GPU: see [RUNBOOK.md](RUNBOOK.md).**
 
 `deploy.sh` refuses to run with uncommitted changes, copies `git archive HEAD` to
 `/data/src/agentr-pipeline/<sha>`, and applies `rbac.yaml` plus the controller Job.
