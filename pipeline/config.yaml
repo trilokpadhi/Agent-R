@@ -70,7 +70,15 @@ search:                        # mcts_collection.py, released code as-is: same t
   seed_trees: {}               # none: the earlier trees were collected with the 500-token cap
 
 revise:                        # path_collection.py --data_type centric --revise 1 (README)
-  alpha: [0.5, 0.7, 1.0]       # paper, per iteration; applied to raw scores as the code does (SciWorld 0-100)
+  alpha: [0.5, 0.7, 0.999]     # paper says 0.5 / 0.7 / 1.0, applied to raw scores as the code does.
+                               # 1.0 is unusable on WebShop: path_collection.py skips a path when
+                               # `high_path[-1].value <= ALPHA`, and WebShop reward is capped at 1.0, so
+                               # alpha=1.0 excludes even perfect trajectories - iteration 3 produced 0 rows.
+                               # Measured over 3,535 terminal leaves of the iteration-3 trees: max value
+                               # 1.000, zero leaves above 1.0, but 1,476 leaves at exactly env_score 1.0.
+                               # Paper Eq. 4 requires alpha < r(tau^g) <= 1, which is empty at alpha=1.
+                               # 0.999 selects exactly the reward-1.0 (optimal) paths, which is the stated
+                               # intent: "By iteration 3, the good trajectories converge toward optimal".
   beta: 0.2                    # paper
 
 sft_data:
