@@ -95,7 +95,39 @@ class FuncCallOffline:
         outputs = self.llm.chat(messages, sampling_params=self.sampling_params, **self.chat_kwargs)
         text = outputs[0].outputs[0].text.strip()
         return text
-    
+
+    def llm_func_n(self, messages, model_name, n):
+        """n independent samples from ONE prompt, via vLLM's `n`.
+
+        The released expand() calls llm_func n times with the identical prompt (the same node.state),
+        so n independent samples at the same temperature from a single request are the same
+        distribution - just one prefill instead of n. Used only when MCTS_BATCH_GEN is set.
+        """
+        if self.api_base:
+            import time
+
+            last_error = None
+            for attempt in range(5):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.served_model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=self.max_new_tokens,
+                        stop=self.stop,
+                        n=n,
+                        extra_body=self.chat_kwargs or None,
+                    )
+                    return [(c.message.content or "").strip() for c in response.choices]
+                except Exception as e:  # transient server/queue errors
+                    last_error = e
+                    time.sleep(2 * (attempt + 1))
+            raise RuntimeError(f"vLLM server call failed after retries: {last_error}")
+        params = SamplingParams(temperature=self.temperature, max_tokens=self.max_new_tokens,
+                                stop=self.stop, n=n)
+        outputs = self.llm.chat(messages, sampling_params=params, **self.chat_kwargs)
+        return [o.text.strip() for o in outputs[0].outputs]
+
 
 class FuncCall:
     def __init__(self, model_name=None):

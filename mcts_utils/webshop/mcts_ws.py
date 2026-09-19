@@ -130,16 +130,21 @@ class ExtendedMCTS(MCTSAgent):
                 node = self._select(node)
         return
     
-    def _generate(self, node):
-
+    def _prompt(self, node):
+        # The released prompt construction, verbatim; factored out so expand() can build it once
+        # for a batched request. Deterministic given node.state.
         conv = deepcopy(node.state)
         while len(self.calling.encoding.encode(str(conv))) > self.max_len - 60:
             del conv.messages[4:6]
             if conv.messages[4][1].startswith('The preceding task has ended.'):
                 del conv.messages[2:4]
+        return conv.to_openai_api_messages()
 
-        prompt = conv.to_openai_api_messages()
-        agent_response = self.calling.llm_func(prompt, self.model_name)
+    def _generate(self, node, agent_response=None):
+        # agent_response is passed in by the batched expand(); otherwise sample here as released.
+        if agent_response is None:
+            prompt = self._prompt(node)
+            agent_response = self.calling.llm_func(prompt, self.model_name)
         ind = 1
         disaster = False
         agent_response = agent_response.strip()
@@ -211,7 +216,16 @@ class ExtendedMCTS(MCTSAgent):
 
     def expand(self, node):
         if not node.is_fully_expanded:
-            sampled_nodes = [self._generate(node) for _ in range(self.generate_cfg.n_generate_samples)]
+            n = self.generate_cfg.n_generate_samples
+            if os.environ.get("MCTS_BATCH_GEN", "0").lower() in ("1", "true", "yes"):
+                # One request with n samples instead of n requests. The n sequential calls below
+                # use the identical prompt (same node.state), so n independent samples from one
+                # request at the same temperature are the same distribution; only the prefill is
+                # shared. The env replay and node creation per sample are unchanged (_generate).
+                replies = self.calling.llm_func_n(self._prompt(node), self.model_name, n)
+                sampled_nodes = [self._generate(node, agent_response=r) for r in replies]
+            else:
+                sampled_nodes = [self._generate(node) for _ in range(n)]
             #sampled_nodes = self._generate(node, self.generate_cfg.n_generate_samples)
             fingerprint, dedup_nodes = set(), []
 

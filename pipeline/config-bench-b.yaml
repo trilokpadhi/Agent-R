@@ -2,7 +2,7 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35eto                    # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+run: bench-b                   # search-speed bench b: option 1 only: 2 env servers per GPU
                                # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
 tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
 
@@ -14,8 +14,9 @@ tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iter
 webshop_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
-gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 3                  # paper: "we conduct Agent-R for three iterations"
+gpus: 2                        # user decision (only 7 H100s are available to the namespace)
+iterations: 1
+stop_after_search: true     # bench: the trees and the wall-clock are the product                  # paper: "we conduct Agent-R for three iterations"
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
@@ -74,7 +75,7 @@ search:                        # mcts_collection.py, released code as-is: same t
   max_depth: 20                # paper
   itera: 8                     # paper / maintainer issue #3
   n_gen: 4                     # paper
-  webshop_tasks: 300           # paper: 300 WebShop simulations; ids from the code's range(1000)
+  webshop_tasks: 40           # paper: 300 WebShop simulations; ids from the code's range(1000)
   sciworld_task_iteration: 9   # 23 tasks x 9 variations ~= the paper's 200 SciWorld simulations
   seed_trees: {}               # none: the earlier trees were collected with the 500-token cap
 
@@ -145,7 +146,7 @@ eval:                          # eval.py
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
-  enabled: true                # NON-FATAL: a failed upload is logged and training continues.
+  enabled: false                # NON-FATAL: a failed upload is logged and training continues.
   remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
   secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat.
                                # Export ONLY the dropbox remote, not your whole rclone config:

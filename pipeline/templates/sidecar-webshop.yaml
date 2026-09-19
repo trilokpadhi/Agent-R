@@ -10,36 +10,38 @@
               # WebShop draws product prices with an UNSEEDED global RNG inside load_products() and
               # only seeds afterwards (SimServer.__init__: load_products -> get_goals ->
               # random.seed(233)), so every construction invents different "under $X" goal caps.
-              # sitecustomize.py runs at interpreter start, before any import, in every process.
+              # sitecustomize.py runs at interpreter start, before any import, in every process, so
+              # all {{ENV_SERVERS}} servers below - and every pod - generate identical prices.
               python -c "import site, os; open(os.path.join(site.getsitepackages()[0], 'sitecustomize.py'), 'w').write('import random\nrandom.seed(233)\n')"
-              if [ "{{WEBSHOP_PROTOCOL}}" = "eto" ]; then
-                # Full 1,181,430-product catalogue and the 12,087 human goals, matching
-                # Co-Evolving's eval_agent/main.py. ONE shared SimServer serves every session
-                # (their SharedWebShopFactory), so a single uvicorn worker is correct here: the
-                # catalogue is ~30GB resident and must not be loaded more than once.
-                export PYTHONPATH=/data/src/webshop-eto/envs/webshop/src
-                cd /data/src/webshop-eto
-                exec python /data/src/agentr-pipeline/{{SHA}}/webshop_eto/server.py
-              else
-                # AgentGym's 1,000-product subset. Cheap per worker, so fan out: Agent-R replays the
-                # episode from step 1 for every generation (~11 env calls per model call) and one
-                # worker serialises all of them.
-                cd /data/src/AgentGym/agentenv-webshop/webshop
-                exec webshop --host 127.0.0.1 --port 36001 --workers {{ENV_WORKERS}}
-              fi
-          env:
-            - {name: HOST, value: "127.0.0.1"}
-            - {name: PORT, value: "36001"}
+              # {{ENV_SERVERS}} independent server PROCESSES on ports 36001..; each Agent-R worker is
+              # pinned to one (port = 36001 + worker % ENV_SERVERS, see search.yaml). Agent-R replays
+              # the episode from step 1 for every generation (~11 env calls per model call) and a
+              # single process serialised all of them behind two BeautifulSoup parses per call.
+              # Separate processes, not uvicorn --workers: the env is stateful per client session, and
+              # a worker pool would round-robin a client's /step to a worker that never saw its /create.
+              N={{ENV_SERVERS}}
+              for i in $(seq 0 $((N - 1))); do
+                PORT=$((36001 + i))
+                if [ "{{WEBSHOP_PROTOCOL}}" = "eto" ]; then
+                  # Full 1,181,430-product catalogue, matching Co-Evolving's eval_agent/main.py.
+                  # Each process holds its own copy, so memory scales with N; see the limits below.
+                  ( export PYTHONPATH=/data/src/webshop-eto/envs/webshop/src HOST=127.0.0.1 PORT=$PORT
+                    cd /data/src/webshop-eto && exec python /data/src/agentr-pipeline/{{SHA}}/webshop_eto/server.py ) &
+                else
+                  ( cd /data/src/AgentGym/agentenv-webshop/webshop && exec webshop --host 127.0.0.1 --port $PORT ) &
+                fi
+              done
+              wait
           startupProbe:
             exec:
-              command: ["/data/envs/agentenv-webshop/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"]
+              command: ["/data/envs/agentenv-webshop/bin/python", "-c", "import urllib.request; [urllib.request.urlopen(f'http://127.0.0.1:{36001+i}/', timeout=3) for i in range({{ENV_SERVERS}})]"]
             periodSeconds: 10
-            timeoutSeconds: 5
-            # The full catalogue takes ~75s to build plus index load; allow generous headroom.
+            timeoutSeconds: 10
+            # The full catalogue takes ~75s to build plus index load, per process; allow headroom.
             failureThreshold: 120
           resources:
             requests: {memory: 16Gi}
-            limits: {memory: 96Gi}
+            limits: {memory: {{ENV_MEMORY_LIMIT}}}
           volumeMounts:
             - name: data
               mountPath: /data

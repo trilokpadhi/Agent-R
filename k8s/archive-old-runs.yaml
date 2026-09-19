@@ -1,0 +1,51 @@
+# One-off: upload the superseded runs to Dropbox, so the PVC can be cleared down to code + models.
+#   q35ws          the broken 17.08 run - trees, revision rows, eval results, train.jsonl, logs.
+#                  Its two 18 GiB checkpoints of a broken model are EXCLUDED (deleted, not archived).
+#   q35v1          an earlier stopped run
+#   /data/results  pre-pipeline pilots
+# Prints DONE_<name> after each source so each can be deleted once its upload is verified.
+#   kubectl apply -n ii400r87 -f k8s/archive-old-runs.yaml
+#   kubectl logs -n ii400r87 -f job/archive-old-runs-001
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: archive-old-runs-001
+  labels: {project: agent-r, step: archive}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, step: archive}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: rclone
+          image: rclone/rclone:1.71.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              OPTS="--transfers 8 --checkers 8 --dropbox-chunk-size 128M --skip-links --stats 2m --stats-one-line --log-level NOTICE"
+              EXCL="--exclude partial/** --exclude done/** --exclude input/** --exclude mcts_utils/** --exclude manifests/**"
+              DST=dropbox:agent-r/archive-old
+              rclone about dropbox: | sed 's/^/  dropbox: /'
+              rc=0
+              echo "== q35v1 ($(du -sh /data/runs/q35v1 | cut -f1))"
+              rclone copy /data/runs/q35v1 "$DST/q35v1" $OPTS $EXCL && echo DONE_q35v1 || rc=1
+              echo "== results ($(du -sh /data/results | cut -f1))"
+              rclone copy /data/results "$DST/results" $OPTS $EXCL && echo DONE_results || rc=1
+              echo "== q35ws, checkpoints excluded ($(du -sh /data/runs/q35ws | cut -f1))"
+              rclone copy /data/runs/q35ws "$DST/q35ws" $OPTS $EXCL --exclude "iter*/sft/output/**" && echo DONE_q35ws || rc=1
+              echo "== remote sizes =="
+              for d in q35v1 results q35ws; do printf "  %-8s " "$d"; rclone size "$DST/$d" --json; echo; done
+              if [ $rc -eq 0 ]; then echo ARCHIVE_OLD_DONE; else echo ARCHIVE_OLD_FAILED; exit 1; fi
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: rclone-conf, mountPath: /config/rclone, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
+        - name: rclone-conf
+          secret: {secretName: rclone-dropbox}

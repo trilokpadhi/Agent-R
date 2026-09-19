@@ -175,6 +175,8 @@ class Pipeline:
             "HF_HUB_OFFLINE": "1",
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "WEBSHOP_PROTOCOL": c["webshop_protocol"],
+            "ENV_SERVERS": inf.get("env_servers", 1),
+            "MCTS_BATCH_GEN": "1" if inf.get("mcts_batch_gen") else "0",
         }
         return "\n".join(f"            - {{name: {k}, value: {json.dumps(str(v))}}}" for k, v in env.items())
 
@@ -193,8 +195,10 @@ class Pipeline:
     ])
 
     def sidecar(self, task):
+        inf = self.cfg["inference"]
         return self.render(f"sidecar-{task}.yaml", {"IMAGE_ENV_SERVER": self.cfg["images"]["env_server"],
-                                                    "ENV_WORKERS": self.cfg["inference"]["env_workers"],
+                                                    "ENV_SERVERS": inf.get("env_servers", 1),
+                                                    "ENV_MEMORY_LIMIT": inf.get("env_memory_limit", "96Gi"),
                                                     "WEBSHOP_PROTOCOL": self.cfg["webshop_protocol"],
                                                     "SHA": self.sha})
 
@@ -285,6 +289,9 @@ class Pipeline:
         log(f"iter{iteration} search {task}: {count} trees")
 
     def step_revise(self, iteration, task, model_dir):
+        if self.cfg.get("stop_after_search"):   # search-speed benchmarks: trees are the product
+            log(f"iter{iteration}: stop_after_search set - search is done, exiting cleanly")
+            sys.exit(0)
         step_dir = self.root / f"iter{iteration}" / f"revise-{task}"
         if self.done(step_dir):
             log(f"iter{iteration} revise {task}: done, skipping")

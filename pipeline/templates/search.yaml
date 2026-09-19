@@ -38,7 +38,7 @@ spec:
               for w in $(seq 0 $((WORKERS - 1))); do
                 LO=$(( SHARD_MIN + w * SPAN )); HI=$(( LO + SPAN )); [ "$HI" -gt "$SHARD_MAX" ] && HI=$SHARD_MAX
                 [ "$LO" -ge "$SHARD_MAX" ] && continue
-                python3 "$CODE/mcts_collection.py" --env_server_base http://127.0.0.1:36001 \
+                python3 "$CODE/mcts_collection.py" --env_server_base "http://127.0.0.1:$((36001 + w % ENV_SERVERS))" \
                   --model_name "$MODEL_NAME" --min "$LO" --max "$HI" {{EXTRA_ARGS}} \
                   >> "$LOG_DIR/$JOB_NAME.w$w.log" 2>&1 &
                 PIDS+=($!)
