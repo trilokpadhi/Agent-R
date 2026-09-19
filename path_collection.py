@@ -136,7 +136,7 @@ def pair_leaf_paths(leaf_paths):
     random.shuffle(paired_paths)
     return paired_paths
 
-def conversation_generation(bad_node_path, good_node_path):
+def conversation_generation(bad_node_path, good_node_path, revision_thought=None):
 
     # Initialize the conversation log
     log_temp = [conv for conv in bad_node_path[0].state]
@@ -147,8 +147,10 @@ def conversation_generation(bad_node_path, good_node_path):
         bad_log.append({"role": "assistant", "content": node.llm_response, "loss": False})
         bad_log.append({"role": "user", "content": node.obs})
 
-    # Append a revision thought to the bad log
-    revision_thought = revision_thoughts[random.randint(0, 9)]
+    # Append a revision thought to the bad log. When pair sharding pre-draws the sentence (see
+    # main), it is passed in; the released behaviour is the draw below.
+    if revision_thought is None:
+        revision_thought = revision_thoughts[random.randint(0, 9)]
     bad_log.append({"role": "assistant", "content": f"Thought: {revision_thought}\nAction: wait", "loss": True})
     bad_log.append({"role": "user", "content": "ok."})
 
@@ -175,7 +177,7 @@ def conversation_generation_good(good_node_path):
 
     return log_temp
 
-def main(calling, data_path, output_dir, task_num, data_type, revise=False):
+def main(calling, data_path, output_dir, task_num, data_type, revise=False, pair_shard=0, pair_shards=1):
     """
     Processes a task using the ExtendedMCTS tree structure and generates logs.
 
@@ -196,8 +198,10 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
     leaf_paths = find_leaf_paths(deepcopy(root))
     sorted_leaf_paths = sort_leaf_paths_by_value(leaf_paths)
 
-    # Handle "good" data type
+    # Handle "good" data type (independent of pairs; under pair sharding only shard 0 writes it)
     if data_type == 'good':
+        if pair_shard != 0:
+            return
         for high_path in sorted_leaf_paths:
             if float(high_path[-1].value) <= float(os.environ["ALPHA"]):
                 continue
@@ -212,9 +216,22 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
 
     # Pair paths and process them
     paired_paths = pair_leaf_paths(sorted_leaf_paths)
+
+    # Pair sharding (pair_shards=1 is the released, serial behaviour).
+    # Pre-draw the revision sentence for every alpha-passing pair, in serial order, from the RNG
+    # state pair_leaf_paths leaves behind. The released loop consumes exactly one randint per pair
+    # that reaches conversation_generation, in that order, and nothing else in this file or in the
+    # LLM client touches `random` - so every shard reproduces the serial assignment exactly.
+    # Shard i then processes pairs i, i+N, i+2N, ... The per-pair work below is unchanged.
+    alpha_env = float(os.environ["ALPHA"])
+    thought_for = {}
+    for i, (hp, _) in enumerate(paired_paths):
+        if float(hp[-1].value) > alpha_env:
+            thought_for[i] = revision_thoughts[random.randint(0, 9)]
+    my_pairs = [(i, p) for i, p in enumerate(paired_paths) if i % pair_shards == pair_shard]
     k_ind = 0
 
-    for high_path, low_path in tqdm(paired_paths, desc="Processing pairs"):
+    for i, (high_path, low_path) in tqdm(my_pairs, desc="Processing pairs"):
         k_ind += 1
         if float(high_path[-1].value) <= float(os.environ["ALPHA"]):
             continue
@@ -228,11 +245,11 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
             bad_node_path, good_node_path, revise_feedback = revise_worst_path(
                 calling, low_path, high_path, task_description
             )
-            revise_log = conversation_generation(bad_node_path, good_node_path)
+            revise_log = conversation_generation(bad_node_path, good_node_path, thought_for[i])
         else:
             revise_feedback = ""
             bad_node_path, good_node_path = low_path, high_path[1:]
-            revise_log = conversation_generation(bad_node_path, good_node_path)
+            revise_log = conversation_generation(bad_node_path, good_node_path, thought_for[i])
 
         # Write the results to a JSONL file
         output_entry = {
@@ -248,7 +265,7 @@ def main(calling, data_path, output_dir, task_num, data_type, revise=False):
 
         
 
-def process_files(calling, input_files, input_dir, output_dir, data_type, revise):
+def process_files(calling, input_files, input_dir, output_dir, data_type, revise, pair_shard=0, pair_shards=1):
     """
     Processes a list of input files and calls the main function for each file.
 
@@ -268,7 +285,9 @@ def process_files(calling, input_files, input_dir, output_dir, data_type, revise
             output_dir,
             task_num,
             data_type,
-            revise=revise
+            revise=revise,
+            pair_shard=pair_shard,
+            pair_shards=pair_shards,
         )
 
 def parse_arguments():
@@ -286,6 +305,10 @@ def parse_arguments():
     parser.add_argument("--max", type=int, default=200, help="Maximum range for data processing (default: 200).")
     parser.add_argument("--min", type=int, default=0, help="Minimum range for data processing (default: 0).")
     parser.add_argument("--step", type=int, default=10, help="Step size for data processing (default: 10).")
+    parser.add_argument("--pair_shard", type=int, default=0,
+                        help="Pair sharding: this process handles pairs whose index modulo pair_shards equals this (default 0).")
+    parser.add_argument("--pair_shards", type=int, default=1,
+                        help="Pair sharding: total number of shards (default 1 = the released serial behaviour).")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -315,4 +338,5 @@ if __name__ == "__main__":
     output_file = os.path.join(output_dir, f"{task_name}_{data_type}.jsonl")
 
     # Process files
-    process_files(calling, sorted_files, input_dir, output_file, data_type, revise)
+    process_files(calling, sorted_files, input_dir, output_file, data_type, revise,
+                  pair_shard=args.pair_shard, pair_shards=args.pair_shards)

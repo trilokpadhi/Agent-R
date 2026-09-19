@@ -1,5 +1,12 @@
 # Step: build revision data (path_collection.py --data_type centric --revise 1), one GPU.
 # The current model (served by vLLM) finds the first wrong step in each bad path.
+#
+# Work unit = (tree, pair shard). The released path_collection.py walks a tree's pairs one at a
+# time; a tree with thousands of pairs held a GPU for 30h while the other 42 trees on it were long
+# finished. Each unit now runs the SAME script on every PAIR_SHARDS-th pair (--pair_shard/--pair_shards);
+# the per-pair work is untouched and the revision sentences are pre-drawn in serial order, so the
+# set of rows a tree produces is identical to the serial run (row order is shard-major; sft-data
+# shuffles anyway). Units are ordered biggest tree first so the tail is one shard, not one tree.
 # Output goes to a temporary directory and is moved into place only on success, because
 # path_collection.py appends to its JSONL and a rerun would otherwise duplicate rows.
 apiVersion: batch/v1
@@ -26,27 +33,38 @@ spec:
             - {name: ALPHA, value: "{{ALPHA}}"}
             - {name: BETA, value: "{{BETA}}"}
             - {name: INPUT_DIR, value: "{{INPUT_DIR}}"}
+            - {name: PAIR_SHARDS, value: "{{PAIR_SHARDS}}"}
+            - {name: CONCURRENCY, value: "{{CONCURRENCY}}"}
           command: ["bash", "-c"]
           args:
             - |
               set -uo pipefail
               rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
 {{START_VLLM}}
-              mkdir -p "$WORKDIR/out" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
+              mkdir -p "$WORKDIR/out" "$WORKDIR/done" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
               TREES=$(ls "$INPUT_DIR" | wc -l)
-              echo "REVISE_START $(date -Is) $TASK trees=$TREES processes=$WORKERS alpha=$ALPHA beta=$BETA model=$MODEL_DIR"
-              # One path_collection.py per tree, $WORKERS at a time, all sharing this GPU's vLLM server.
-              # A tree's output moves into out/ only when it finishes, so a restart skips finished trees
-              # (path_collection.py appends to its JSONL, so partial output must never be reused).
-              ls "$INPUT_DIR" | xargs -P "$WORKERS" -n 1 bash -c '
-                t="$1"
-                [ -d "out/$t" ] && exit 0
-                rm -rf "partial/$t"
-                python3 "$CODE/path_collection.py" --input_dir "$INPUT_DIR/$t" --output_dir "partial/$t" \
-                  --data_type centric --revise 1 >> "$LOG_DIR/$JOB_NAME.$t.log" 2>&1 \
-                  && mkdir -p "partial/$t" && mv "partial/$t" "out/$t"' _
+              echo "REVISE_START $(date -Is) $TASK trees=$TREES pair_shards=$PAIR_SHARDS concurrency=$CONCURRENCY alpha=$ALPHA beta=$BETA model=$MODEL_DIR"
+              # Units, biggest tree first (-L follows the per-tree symlink to size the real file).
+              ls -SL "$INPUT_DIR"/*/*.json | xargs -n1 dirname | xargs -n1 basename | while read -r t; do
+                for i in $(seq 0 $((PAIR_SHARDS - 1))); do echo "$t $i"; done
+              done | xargs -P "$CONCURRENCY" -n 2 bash -c '
+                t="$1"; i="$2"
+                [ -d "out/$t" ] && exit 0            # tree already assembled (or done by an older run)
+                [ -d "done/$t/p$i" ] && exit 0       # this shard already finished
+                rm -rf "partial/$t/p$i"
+                python3 "$CODE/path_collection.py" --input_dir "$INPUT_DIR/$t" --output_dir "partial/$t/p$i" \
+                  --data_type centric --revise 1 --pair_shard "$i" --pair_shards "$PAIR_SHARDS" \
+                  >> "$LOG_DIR/$JOB_NAME.$t.p$i.log" 2>&1 \
+                  && mkdir -p "partial/$t/p$i" "done/$t" && mv "partial/$t/p$i" "done/$t/p$i"' _
               RC=$?
               kill "$VLLM_PID" 2>/dev/null
+              # Assemble each tree whose shards are all done into the layout downstream expects.
+              for t in $(ls "$INPUT_DIR"); do
+                [ -d "out/$t" ] && continue
+                [ "$(ls -d done/$t/p* 2>/dev/null | wc -l)" -eq "$PAIR_SHARDS" ] || continue
+                mkdir -p "out/$t"
+                cat done/$t/p*/*_centric.jsonl > "out/$t/${TASK}_centric.jsonl" 2>/dev/null || true
+              done
               DONE=$(ls out | wc -l)
               [ "$RC" -eq 0 ] && [ "$DONE" -eq "$TREES" ] || { echo "REVISE_FAILED rc=$RC trees_done=$DONE/$TREES; see $LOG_DIR/$JOB_NAME.*.log"; exit 1; }
               echo "REVISE_DONE $(date -Is) trees=$DONE rows=$(cat out/*/*.jsonl 2>/dev/null | wc -l)"

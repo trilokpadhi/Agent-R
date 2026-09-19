@@ -80,6 +80,13 @@ revise:                        # path_collection.py --data_type centric --revise
                                # 0.999 selects exactly the reward-1.0 (optimal) paths, which is the stated
                                # intent: "By iteration 3, the good trajectories converge toward optimal".
   beta: 0.2                    # paper
+  pair_shards: 8               # SPEED ONLY, not a method change. The released path_collection.py walks a
+                               # tree's pairs one at a time; one tree with 5,480 pairs held a GPU for 30h.
+                               # Each tree now runs as 8 processes, each taking every 8th pair, with the
+                               # revision sentences pre-drawn in serial order - same pairs, same model
+                               # calls, same rows (see path_collection.py main). 1 = released behaviour.
+  concurrency: 96              # (tree, shard) units in flight per GPU. vLLM batches them; measured
+                               # KV-cache use at 43 in flight was 1.5-2.3%, so there is ample headroom.
 
 sft_data:
   # Maintainer (issue #8): each iteration trains on revise_log + high_log entries; paper Table 1 sizes.

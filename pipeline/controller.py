@@ -308,6 +308,8 @@ class Pipeline:
                 "ALPHA": alpha,
                 "BETA": beta,
                 "INPUT_DIR": input_dir,
+                "PAIR_SHARDS": self.cfg["revise"].get("pair_shards", 1),
+                "CONCURRENCY": self.cfg["revise"].get("concurrency", len(chunk)),
             }
             jobs.append((name, self.render("revise.yaml", values)))
         log(f"iter{iteration} revise {task}: {len(files)} trees over {len(jobs)} shards, alpha={alpha} beta={beta}")
