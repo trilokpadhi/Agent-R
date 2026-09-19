@@ -197,5 +197,17 @@ constraint — the environment server and MCTS's replay-from-root behaviour are.
 | SFT | 2h17m | 3 epochs, 219 steps, ~38 s/step |
 | eval | 10 min | 200 tasks over 7 shards |
 
-The obvious speedup is capping pairs per tree in `path_collection.py` — we sample 5,500 rows from
-141,548, so a cap would not change the training data but would remove most of the revise tail.
+**Pair sharding (from commit `f6031b1`) removes the revise tail without changing the method.** Set in
+`pipeline/config.yaml`:
+
+```yaml
+revise:
+  pair_shards: 8      # processes per tree, each taking every 8th pair; 1 = released serial behaviour
+  concurrency: 96     # (tree, shard) units in flight per GPU
+```
+
+Each tree's pair list is identical in every process (seeded shuffle), shards are disjoint, and the
+revision sentences are pre-drawn in serial order — verified to give the identical set of rows as the
+serial run (see REPRODUCTION.md §8). The Job orders units biggest tree first, resumes per shard
+(`done/<tree>/p<i>/`), and assembles `out/<tree>/…_centric.jsonl` in the layout downstream reads.
+Revise drops from 6–32 h per iteration to roughly 3–6 h.

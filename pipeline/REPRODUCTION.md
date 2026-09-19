@@ -142,10 +142,23 @@ method.
 | SFT | 2h17m | 3 epochs, 219 steps, ~38 s/step |
 | eval | 10 min | 200 tasks over 7 shards |
 
-**The dominant cost is a long tail in revise.** Iteration 2 hit a tree with **5,228 pairs**, taking
-~12 hours alone. Pair count is quadratic in the number of scoring leaf paths, and we sample 5,500
-rows from >100,000, so **capping pairs per tree would not change the training data** and would
-remove most of this. The paper specifies no cap. This is the single highest-value change left.
+**The dominant cost was a long tail in revise.** The released `path_collection.py` walks a tree's
+pairs one at a time, and pair count is quadratic in the number of scoring leaf paths, so the tail
+grows as the model improves: iteration 2's worst tree had 5,228 pairs (~17 h), iteration 3's had
+5,480 (~30 h), during which the other six GPUs sat idle. Measured revise times: 6h13m, 17h, 32h.
+
+**Fixed by pair sharding (commit `f6031b1`), which does not change the method.** Each tree now runs
+as 8 processes, shard *i* taking pairs *i, i+8, i+16, …* of the identical seeded list. The per-pair
+work is untouched. The only quantity that could have differed — which of the ten revision sentences
+a pair draws, since the released loop calls `random.randint` once per α-passing pair in serial
+order — is pre-drawn in that same order from the same RNG state and passed in, so every shard
+reproduces the serial assignment exactly. Verified two ways: an offline simulation of the released
+loop (N=1/4/8, trees of 45/531/2,045 pairs: identical index→sentence sets, no duplicates) and an
+end-to-end run of the real script on a real tree with `--revise 0` (serial vs 8 shards: 107 vs 107
+rows, identical row sets, identical sentence multiset). `pair_shards: 1` is the released behaviour.
+Expected revise time per iteration: ~3–6 h instead of 6–32 h; a full 3-iteration run ~28 h
+instead of ~68 h. Applies from the first run launched after `f6031b1`; iteration 3 of `q35eto` ran
+on the serial code.
 
 ## 9. Open items
 
