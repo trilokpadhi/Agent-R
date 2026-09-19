@@ -145,8 +145,8 @@ archive:                       # after each iteration's eval, upload its artifac
                                #   kubectl create secret generic rclone-dropbox -n ii400r87 --from-file=rclone.conf=/tmp/rclone-dropbox.conf
                                #   rm /tmp/rclone-dropbox.conf
                                # If the Secret is absent the archive step is skipped with a log line, never a stall.
-  trees: false                 # also upload search-* MCTS trees (~5-7 GiB per iteration)
-  revise: false                # also upload revise-* rows   (~10-25 GiB per iteration)
+  trees: true                  # also upload search-* MCTS trees (~5-7 GiB per iteration)
+  revise: true                 # also upload revise-* rows   (~10-25 GiB per iteration)
                                # Always uploaded: eval results, sft-data (train.jsonl), the SFT checkpoint
                                # (~18 GiB), run.json and logs. A free Dropbox is 2 GB: the checkpoint
                                # alone needs a paid plan.
