@@ -481,6 +481,41 @@ class Pipeline:
             f"swift_saved_configs/. Weights (model-*.safetensors, index) are the fine-tuned ones.\n")
         log(f"prepared {ckpt} for vLLM: base model config/tokenizer files, fine-tuned weights")
 
+    def step_archive(self, iteration):
+        """Upload an iteration's artifacts to Dropbox (rclone) after eval. Never blocks training:
+        a failure is logged and the next iteration proceeds; a rerun resumes and re-copies only
+        what changed. The token is a Secret created from the user's terminal, not from here."""
+        a = self.cfg.get("archive") or {}
+        if not a.get("enabled"):
+            return
+        step_dir = self.root / f"iter{iteration}" / "archive"
+        if self.done(step_dir):
+            log(f"iter{iteration} archive: done, skipping")
+            return
+        step_dir.mkdir(parents=True, exist_ok=True)
+        paths = ["eval", "sft-data", "sft/output"]           # results, training set, checkpoint
+        if a.get("trees"):
+            paths += [f"search-{t}" for t in self.tasks]       # MCTS trees, ~5-7 GiB per iteration
+        if a.get("revise"):
+            paths += [f"revise-{t}" for t in self.tasks]       # revision rows, ~10-25 GiB per iteration
+        name = self.job_name(iteration, "archive")
+        values = self.base_values(name) | {
+            "IMAGE_RCLONE": self.cfg["images"]["rclone"],
+            "RCLONE_SECRET": a["secret"],
+            "REMOTE": a["remote"],
+            "ITER": iteration,
+            "ITER_DIR": self.root / f"iter{iteration}",
+            "RUN_DIR": self.root,
+            "PATHS": " ".join(paths),
+        }
+        log(f"iter{iteration} archive: {paths} -> {a['remote']}/{self.cfg['run']}/iter{iteration}")
+        try:
+            self.run_jobs([(name, self.render("archive.yaml", values))])
+            self.mark_done(step_dir, {"paths": paths, "remote": a["remote"]})
+            log(f"iter{iteration} archive: done")
+        except RuntimeError as e:
+            log(f"iter{iteration} archive: FAILED - non-fatal, continuing. {e}")
+
     def step_eval(self, iteration, model_dir):
         step_dir = self.root / f"iter{iteration}" / "eval"
         if self.done(step_dir):
@@ -542,6 +577,7 @@ class Pipeline:
             model_dir = self.step_sft(it, start, data)
             self.prepare_checkpoint_for_vllm(model_dir)
             self.step_eval(it, model_dir)
+            self.step_archive(it)
         log("PIPELINE_DONE")
 
 

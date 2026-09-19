@@ -24,6 +24,7 @@ images:                        # pinned by digest; verified on this cluster (Sep
   sft: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope@sha256:cb8aadb783de32cd9df894b0d44b96161b31bed78d1eeafd59e9563a518743c3  # ms-swift 4.5.3, transformers 5.16.1
   env_server: condaforge/miniforge3:24.3.0-0
   controller: alpine/k8s@sha256:5efac3ed9955c8747296d520539cded681f4ef5dbb73fb591141df282b61cc35  # 1.32.13, matches the cluster
+  rclone: rclone/rclone:1.71.0   # same version as the Mac that authorises Dropbox, so the conf format matches
 
 node_selector_key: nvidia.com/gpu.product
 node_selector_value: NVIDIA-H100-80GB-HBM3
@@ -134,3 +135,15 @@ eval:                          # eval.py
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
                                # rerun eval with 100 afterwards as a supplementary number.
   task_limit: 0                # 0 = full 200-item test sets
+
+archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
+  enabled: true                # NON-FATAL: a failed upload is logged and training continues.
+  remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
+  secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat:
+                               #   kubectl create secret generic rclone-dropbox -n ii400r87 \
+                               #     --from-file=rclone.conf="$(rclone config file | tail -1)"
+  trees: false                 # also upload search-* MCTS trees (~5-7 GiB per iteration)
+  revise: false                # also upload revise-* rows   (~10-25 GiB per iteration)
+                               # Always uploaded: eval results, sft-data (train.jsonl), the SFT checkpoint
+                               # (~18 GiB), run.json and logs. A free Dropbox is 2 GB: the checkpoint
+                               # alone needs a paid plan.

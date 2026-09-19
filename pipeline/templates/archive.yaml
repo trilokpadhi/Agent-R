@@ -1,0 +1,56 @@
+# Step: archive one iteration's artifacts to Dropbox with rclone, after eval.
+#
+# NON-FATAL: the controller logs a failure here and continues, so a Dropbox problem never blocks
+# training. `rclone copy` never deletes anything on the remote. Unchanged files are skipped, so a
+# rerun is cheap.
+#
+# The Dropbox token lives in a Kubernetes Secret ({{RCLONE_SECRET}}, key rclone.conf) created from
+# the user's own terminal - it never passes through this pipeline's code, config or logs. rclone
+# cannot persist a refreshed token to the read-only mount; it refreshes in memory each run from the
+# refresh_token in the conf, which is fine.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  labels: {project: agent-r, pipeline-run: "{{RUN}}", step: archive}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 43200
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, pipeline-run: "{{RUN}}", step: archive}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: rclone
+          image: {{IMAGE_RCLONE}}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              SRC="{{ITER_DIR}}"; DST="{{REMOTE}}/{{RUN}}/iter{{ITER}}"
+              # Dropbox: rclone's own guidance is <= 8 transfers and a large chunk size.
+              OPTS="--transfers 8 --checkers 8 --dropbox-chunk-size 128M --skip-links --stats 2m --stats-one-line --log-level NOTICE"
+              # Scratch and duplicate layouts inside a step, never worth uploading.
+              EXCL="--exclude partial/** --exclude done/** --exclude input/** --exclude mcts_utils/**"
+              echo "ARCHIVE_START $(date -Is) $SRC -> $DST"
+              rclone about "{{REMOTE}}" 2>/dev/null | sed 's/^/  dropbox: /' || true
+              rc=0
+              for d in {{PATHS}}; do
+                if [ ! -e "$SRC/$d" ]; then echo "  skip $d (absent)"; continue; fi
+                echo "== $d  ($(du -sh "$SRC/$d" 2>/dev/null | cut -f1))"
+                rclone copy "$SRC/$d" "$DST/$d" $OPTS $EXCL || { echo "  FAILED: $d"; rc=1; }
+              done
+              # Run-level metadata, small and idempotent.
+              rclone copy "{{RUN_DIR}}/run.json" "{{REMOTE}}/{{RUN}}/" $OPTS || rc=1
+              rclone copy "{{RUN_DIR}}/logs" "{{REMOTE}}/{{RUN}}/logs" $OPTS --exclude manifests/** || rc=1
+              if [ $rc -eq 0 ]; then echo "ARCHIVE_DONE $(date -Is)"; else echo "ARCHIVE_FAILED"; exit 1; fi
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: rclone-conf, mountPath: /config/rclone, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{PVC}}}
+        - name: rclone-conf
+          secret: {secretName: {{RCLONE_SECRET}}}
