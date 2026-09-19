@@ -139,9 +139,12 @@ eval:                          # eval.py
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
   enabled: true                # NON-FATAL: a failed upload is logged and training continues.
   remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
-  secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat:
-                               #   kubectl create secret generic rclone-dropbox -n ii400r87 \
-                               #     --from-file=rclone.conf="$(rclone config file | tail -1)"
+  secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat.
+                               # Export ONLY the dropbox remote, not your whole rclone config:
+                               #   rclone config show dropbox > /tmp/rclone-dropbox.conf
+                               #   kubectl create secret generic rclone-dropbox -n ii400r87 --from-file=rclone.conf=/tmp/rclone-dropbox.conf
+                               #   rm /tmp/rclone-dropbox.conf
+                               # If the Secret is absent the archive step is skipped with a log line, never a stall.
   trees: false                 # also upload search-* MCTS trees (~5-7 GiB per iteration)
   revise: false                # also upload revise-* rows   (~10-25 GiB per iteration)
                                # Always uploaded: eval results, sft-data (train.jsonl), the SFT checkpoint

@@ -492,6 +492,12 @@ class Pipeline:
         if self.done(step_dir):
             log(f"iter{iteration} archive: done, skipping")
             return
+        # A missing Secret would leave the pod in ContainerCreating - a stall, not a failure - so
+        # check first and skip cleanly. The step reruns on the next resume once the Secret exists.
+        if run(["kubectl", "get", "secret", a["secret"], "-n", self.ns], check=False).returncode != 0:
+            log(f"iter{iteration} archive: Secret '{a['secret']}' not found in {self.ns}; skipping "
+                f"(create it from your terminal, see config.yaml, then resume to upload)")
+            return
         step_dir.mkdir(parents=True, exist_ok=True)
         paths = ["eval", "sft-data", "sft/output"]           # results, training set, checkpoint
         if a.get("trees"):
