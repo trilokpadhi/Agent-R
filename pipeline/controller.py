@@ -177,6 +177,7 @@ class Pipeline:
             "WEBSHOP_PROTOCOL": c["webshop_protocol"],
             "ENV_SERVERS": inf.get("env_servers", 1),
             "MCTS_BATCH_GEN": "1" if inf.get("mcts_batch_gen") else "0",
+            "MCTS_PROFILE": "1" if inf.get("mcts_profile") else "0",
         }
         return "\n".join(f"            - {{name: {k}, value: {json.dumps(str(v))}}}" for k, v in env.items())
 

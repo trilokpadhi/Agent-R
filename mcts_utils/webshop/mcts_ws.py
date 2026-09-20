@@ -21,6 +21,29 @@ warnings.simplefilter("ignore", DeprecationWarning)
 from mcts_utils.mcts_raw import MCTSNode, MCTSAgent
 import os
 import re
+import time as _time
+from collections import defaultdict as _dd
+
+# Optional timing, MCTS_PROFILE=1. Search is CPU-heavy per generation (two deepcopies of the whole
+# conversation, a full re-tokenisation for the length check, and an environment replay from step 1),
+# and two speed hypotheses have already proved wrong by guesswork - so measure the split directly.
+_PROF = os.environ.get("MCTS_PROFILE", "0").lower() in ("1", "true", "yes")
+_T, _N = _dd(float), _dd(int)
+
+def _tick():
+    return _time.perf_counter() if _PROF else 0.0
+
+def _tock(key, t0):
+    if _PROF:
+        _T[key] += _time.perf_counter() - t0
+        _N[key] += 1
+
+def _prof_report(tag):
+    if not _PROF:
+        return
+    tot = sum(_T.values()) or 1.0
+    parts = " ".join(f"{k}={_T[k]:.1f}s/{_N[k]}({100*_T[k]/tot:.0f}%)" for k in sorted(_T, key=lambda x: -_T[x]))
+    print(f"MCTS_PROFILE {tag} total_measured={tot:.1f}s {parts}", flush=True)
 
 @dataclass
 class MCTSConfig:
@@ -128,27 +151,36 @@ class ExtendedMCTS(MCTSAgent):
             while node and not node.is_terminal:
                 self.expand(node)
                 node = self._select(node)
+        _prof_report(f"task={self.idx}")
         return
     
     def _prompt(self, node):
         # The released prompt construction, verbatim; factored out so expand() can build it once
         # for a batched request. Deterministic given node.state.
+        _t = _tick()
         conv = deepcopy(node.state)
         while len(self.calling.encoding.encode(str(conv))) > self.max_len - 60:
             del conv.messages[4:6]
             if conv.messages[4][1].startswith('The preceding task has ended.'):
                 del conv.messages[2:4]
-        return conv.to_openai_api_messages()
+        out = conv.to_openai_api_messages()
+        _tock("prompt_build", _t)
+        return out
 
     def _generate(self, node, agent_response=None):
         # agent_response is passed in by the batched expand(); otherwise sample here as released.
         if agent_response is None:
             prompt = self._prompt(node)
+            _t = _tick()
             agent_response = self.calling.llm_func(prompt, self.model_name)
+            _tock("llm", _t)
         ind = 1
         disaster = False
         agent_response = agent_response.strip()
+        _t = _tick()
         conv = deepcopy(node.state)
+        _tock("deepcopy", _t)
+        _t = _tick()
         _ = self.env.reset(self.idx)
         conv.append_message(conv.roles[1], None)
         conv.update_last_message(agent_response.replace(f"Action {ind}:", "Action:").replace(f"Thought {ind}:", "Thought:").strip())
@@ -156,6 +188,7 @@ class ExtendedMCTS(MCTSAgent):
         for action in node.recent_actions:
             action_temp = action[0]
             _ = self.env.step(action_temp)
+        _tock("env_replay", _t)
 
         current_env = self.env
         current_recent_actions = deepcopy(node.recent_actions)
@@ -173,7 +206,9 @@ class ExtendedMCTS(MCTSAgent):
 
         
 
+        _t = _tick()
         step_output = current_env.step(new_action)
+        _tock("env_step", _t)
         current_env_state, current_env_reward, current_env_done = (
                 step_output.state,
                 step_output.reward,
@@ -222,7 +257,10 @@ class ExtendedMCTS(MCTSAgent):
                 # use the identical prompt (same node.state), so n independent samples from one
                 # request at the same temperature are the same distribution; only the prefill is
                 # shared. The env replay and node creation per sample are unchanged (_generate).
-                replies = self.calling.llm_func_n(self._prompt(node), self.model_name, n)
+                _p = self._prompt(node)
+                _t = _tick()
+                replies = self.calling.llm_func_n(_p, self.model_name, n)
+                _tock("llm", _t)
                 sampled_nodes = [self._generate(node, agent_response=r) for r in replies]
             else:
                 sampled_nodes = [self._generate(node) for _ in range(n)]
