@@ -61,7 +61,8 @@ inference:                     # shared by search and revision (eval overrides t
                                # env is stateful per client. Prices are identical across processes (seeded
                                # before construction). Under the eto protocol each process holds the full
                                # catalogue, so RAM scales with N: measure one process before raising this.
-  env_memory_limit: 96Gi       # sidecar memory limit; must cover env_servers x (one catalogue's RSS)
+  env_memory_limit: 48Gi       # measured: one full-catalogue env server is 15.3 GiB RSS / 19.1 GiB peak,
+                               # ready in 158s. Two fit with headroom; re-measure before raising env_servers.
   mcts_batch_gen: true        # expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
                                # Same prompt, same temperature -> same distribution; shares the prefill.
                                # false = the released loop. The authors left this exact idea commented out
