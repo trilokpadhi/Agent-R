@@ -50,9 +50,13 @@ environments:                  # prebuilt on the PVC; SciWorld uses the maintain
 
 inference:                     # shared by search and revision (eval overrides temp below)
   temp: 1                      # paper: expansion temperature 1; also the code's default TEMP (llm_server.py)
-  max_new_tokens: none         # user (Sep 15): no output cap for Qwen3.5. The authors' 500 fits Llama-3.1's short
-                               # thoughts, but cut off >10% of Qwen3.5 replies before 'Action:' (10,194 cut-off turns in
-                               # q35ws iter-1 training data), so the trained model looped in eval
+  max_new_tokens: 4096         # runaway guard, NOT the authors' 500. Their 500 cut >10% of Qwen3.5
+                               # replies before 'Action:' and produced the 17.08 run. Unbounded is also
+                               # unsafe: a degenerate repetition loop generated 20,000+ tokens in one
+                               # reply and hung eval shard 4 of q35fast until the client's 600s timeout,
+                               # failing the job after 2.5h. Measured over 1,875 real eval replies:
+                               # median 34 tokens, p99 692, max 2,332 - so 4096 truncates 0.000% of
+                               # legitimate replies and stops a runaway in ~30s.
   max_token_length: 8192       # maintainer, issue #8
   enable_thinking: 0           # Agent-R's base model (Llama-3.1) has no thinking mode
   vllm_dtype: bfloat16

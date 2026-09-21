@@ -536,7 +536,11 @@ class Pipeline:
             log(f"iter{iteration} eval: done, {json.loads((step_dir / '.done').read_text())}")
             return
         e = self.cfg["eval"]
-        model_type = f"agentr-iter{iteration}"
+        # eval.tag keeps result sets apart when the same checkpoint is evaluated under different
+        # protocols (e.g. the table's 10-step budget vs the Agent-R paper's 100), so neither
+        # overwrites the other and both can be reported.
+        tag = (self.cfg["eval"].get("tag") or "").strip()
+        model_type = f"agentr-iter{iteration}" + (f"-{tag}" if tag else "")
         # One Job per GPU per task: the 200 test ids are striped over the shards, which all write to
         # the same result directory. Eval used to run on a single GPU while the other six sat idle.
         shards = self.cfg["gpus"]

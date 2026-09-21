@@ -2,7 +2,8 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35eto                    # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+run: q35eto                    # re-evaluating the EXISTING q35eto checkpoints at 100 steps;
+                               # search/revise/sft are .done so only eval runs.
                                # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
 tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
 
@@ -15,7 +16,7 @@ webshop_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 3                  # paper: "we conduct Agent-R for three iterations"
+iterations: 2                  # the two checkpoints that exist: iter1 (51.66 @10) and iter2 (45.42 @10)
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
@@ -144,17 +145,17 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
 
 eval:                          # eval.py
   temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
-  max_steps: 10                # Co-Evolving eval_agent/configs/task/webshop.json, to match the table.
+  max_steps: 100               # the Agent-R paper's budget (page 9), for the collaborator's request
                                # NOTE this is a real handicap for Agent-R: a revision trajectory is
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
                                # rerun eval with 100 afterwards as a supplementary number.
-  tag: ""                      # suffix for the result directory, so the same checkpoint can be evaluated
+  tag: "s100"                      # suffix for the result directory, so the same checkpoint can be evaluated
                                # under more than one protocol without collision (e.g. tag: s100).
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
-  enabled: true                # NON-FATAL: a failed upload is logged and training continues.
+  enabled: false                # NON-FATAL: a failed upload is logged and training continues.
   remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
   secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat.
                                # Export ONLY the dropbox remote, not your whole rclone config:
