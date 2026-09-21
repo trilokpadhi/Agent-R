@@ -549,7 +549,10 @@ class Pipeline:
         jobs = []
         for task in self.tasks:
             for shard in range(shards):
-                name = self.job_name(iteration, f"eval-{task[:2]}", shard)
+                # The tag must be in the JOB name too, not only the directories: otherwise a
+                # second protocol reuses the first run's completed Jobs, executes nothing, and
+                # reports an empty result set.
+                name = self.job_name(iteration, f"eval-{task[:2]}" + (f"-{tag}" if tag else ""), shard)
                 limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
                 values = self.base_values(name) | {
                     "SIDECAR": self.sidecar(task),
