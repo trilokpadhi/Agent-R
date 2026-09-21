@@ -531,7 +531,10 @@ class Pipeline:
             log(f"iter{iteration} archive: FAILED - non-fatal, continuing. {e}")
 
     def step_eval(self, iteration, model_dir):
-        step_dir = self.root / f"iter{iteration}" / "eval"
+        # The tag is part of the STEP directory, not just the results directory: otherwise a
+        # re-evaluation under a different protocol would find the previous run's .done and skip.
+        tag = (self.cfg["eval"].get("tag") or "").strip()
+        step_dir = self.root / f"iter{iteration}" / ("eval" + (f"-{tag}" if tag else ""))
         if self.done(step_dir):
             log(f"iter{iteration} eval: done, {json.loads((step_dir / '.done').read_text())}")
             return
@@ -539,7 +542,6 @@ class Pipeline:
         # eval.tag keeps result sets apart when the same checkpoint is evaluated under different
         # protocols (e.g. the table's 10-step budget vs the Agent-R paper's 100), so neither
         # overwrites the other and both can be reported.
-        tag = (self.cfg["eval"].get("tag") or "").strip()
         model_type = f"agentr-iter{iteration}" + (f"-{tag}" if tag else "")
         # One Job per GPU per task: the 200 test ids are striped over the shards, which all write to
         # the same result directory. Eval used to run on a single GPU while the other six sat idle.
