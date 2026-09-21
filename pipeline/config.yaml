@@ -68,7 +68,12 @@ inference:                     # shared by search and revision (eval overrides t
                                # ready in 158s. Two fit with headroom; re-measure before raising env_servers.
   mcts_profile: false          # MCTS_PROFILE=1: per-task timing of prompt_build / llm / deepcopy /
                                # env_replay / env_step, printed to the worker log. Inert when false.
-  mcts_batch_gen: false        # expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
+  mcts_batch_gen: false        # MEASURED HARMFUL, do not enable. At full scale it saved only 9% of search
+                               # (2h23m -> 2h11m) and cost 2.2 points: q35fast iteration 1 scored 49.43
+                               # against 51.66 for the identical pipeline without it. bench-c agreed
+                               # independently (24.5% perfect leaf paths vs 28.7%). vLLM's n=4 shares one
+                               # prefill, so the four candidates correlate and MCTS explores less.
+                               # Kept in the code, off by default. pair_shards is the safe speedup.# expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
                                # Same prompt, same temperature -> same distribution; shares the prefill.
                                # false = the released loop. The authors left this exact idea commented out
                                # in expand() (`self._generate(node, n_generate_samples)`).
@@ -154,7 +159,7 @@ eval:                          # eval.py
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
-  enabled: true                # NON-FATAL: a failed upload is logged and training continues.
+  enabled: false                # NON-FATAL: a failed upload is logged and training continues.
   remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
   secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat.
                                # Export ONLY the dropbox remote, not your whole rclone config:
