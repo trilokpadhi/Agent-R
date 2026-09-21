@@ -16,7 +16,10 @@ webshop_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 2                  # the two checkpoints that exist: iter1 (51.66 @10) and iter2 (45.42 @10)
+iterations: 3                  # iter1 and iter2 checkpoints exist -> only eval-s100 runs for them.
+                               # iter3 has search/revise/sft-data .done but NO checkpoint: its SFT died on
+                               # 'Disk quota exceeded' before saving, so SFT reruns (~50 min, 1 epoch,
+                               # continuing from iter2) and is then evaluated at 100 steps.
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
