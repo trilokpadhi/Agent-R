@@ -154,6 +154,7 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
 eval:                          # eval.py
   temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
   max_steps: 100               # Agent-R paper budget
+  tag: "s100"                  # separate step+results dir so the 10-step run is untouched
                                # NOTE this is a real handicap for Agent-R: a revision trajectory is
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
