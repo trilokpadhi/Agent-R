@@ -175,6 +175,8 @@ class Pipeline:
             "HF_HUB_OFFLINE": "1",
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "WEBSHOP_PROTOCOL": c["webshop_protocol"],
+            "SCIWORLD_PROTOCOL": c.get("sciworld_protocol", "agentgym"),
+            "SCIWORLD_SPLIT": c["eval"].get("sciworld_split", "test"),
             "ENV_SERVERS": inf.get("env_servers", 1),
             "MCTS_BATCH_GEN": "1" if inf.get("mcts_batch_gen") else "0",
             "MCTS_PROFILE": "1" if inf.get("mcts_profile") else "0",
@@ -195,12 +197,14 @@ class Pipeline:
         '              echo "vLLM server ready"',
     ])
 
-    def sidecar(self, task):
+    def sidecar(self, task, split=None):
         inf = self.cfg["inference"]
         return self.render(f"sidecar-{task}.yaml", {"IMAGE_ENV_SERVER": self.cfg["images"]["env_server"],
                                                     "ENV_SERVERS": inf.get("env_servers", 1),
                                                     "ENV_MEMORY_LIMIT": inf.get("env_memory_limit", "96Gi"),
                                                     "WEBSHOP_PROTOCOL": self.cfg["webshop_protocol"],
+                                                    "SCIWORLD_PROTOCOL": self.cfg.get("sciworld_protocol", "agentgym"),
+                                                    "SCIWORLD_SPLIT": split or "train",
                                                     "SHA": self.sha})
 
     def done(self, step_dir):
@@ -234,6 +238,15 @@ class Pipeline:
         return ranges, len(usable)
 
     def sciworld_shards(self):
+        """(min, max) --min/--max pairs, one per GPU.
+
+        eto: positions in Co-Evolving's (task_name, variation_idx) train split, so the paper's 200
+        simulations are the first 200 positions - the same shape as WebShop.
+        agentgym: the released code walks task_nums[min:max] of the 23-task split instead.
+        """
+        if self.cfg.get("sciworld_protocol") == "eto":
+            n = self.cfg["search"].get("sciworld_tasks", 200)
+            return [(c[0], c[-1] + 1) for c in split_evenly(list(range(n)), self.cfg["gpus"])]
         n = min(self.cfg["search"].get("sciworld_tasks", SCIWORLD_TASK_NUMS), SCIWORLD_TASK_NUMS)
         return [(c[0], c[-1] + 1) for c in split_evenly(list(range(n)), self.cfg["gpus"])]
 
@@ -555,7 +568,7 @@ class Pipeline:
                 name = self.job_name(iteration, f"eval-{task[:2]}" + (f"-{tag}" if tag else ""), shard)
                 limit = f'            - {{name: TASK_LIMIT, value: "{e["task_limit"]}"}}' if e["task_limit"] else ""
                 values = self.base_values(name) | {
-                    "SIDECAR": self.sidecar(task),
+                    "SIDECAR": self.sidecar(task, split=self.cfg["eval"].get("sciworld_split", "test")),
                     "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
                                                      model_type=model_type, temp=e["temp"]),
                     "START_VLLM": self.START_VLLM,

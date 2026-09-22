@@ -17,6 +17,7 @@ from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
+from sciworld_eto.client import SciworldEtoEnvClient, is_eto as is_sci_eto, load_split as sci_split
 import argparse
 import os
 
@@ -38,6 +39,8 @@ def initialize_environment(Task: str, env_server_base: str, data_len: int = 200)
             return WebshopEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
         return WebshopEnvClient(env_server_base=env_server_base, data_len=data_len)
     elif Task == "sciworld":
+        if is_sci_eto():
+            return SciworldEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
         return SciworldEnvClient(env_server_base=env_server_base, data_len=data_len)
     elif Task == "textcraft":
         return TextCraftEnvClient(env_server_base=env_server_base, data_len=data_len)
@@ -66,6 +69,12 @@ def main(Task: str, model_name: str, env_server_base: str, max_steps: int):
         # ETO addresses tasks by WebShop session id; the 200 ids are a different set from
         # AgentGym's (the two overlap by 3), so the split file has to come from ETO.
         task_inds = [str(i) for i in load_split("test")]
+    elif Task == "sciworld" and is_sci_eto():
+        # SCIWORLD_SPLIT picks the reported column: dev is ScienceWorld (Seen) - it shares 54
+        # (task, variation) pairs with train - and test is (Unseen), sharing none. Task ids are
+        # positions in that split; the server resolves them to (task_name, variation_idx).
+        split = os.environ.get("SCIWORLD_SPLIT", "test")
+        task_inds = [str(i) for i in range(len(sci_split(split)))]
     else:
         test_file = f"test_id/{Task}_test.json"
         if not os.path.exists(test_file):

@@ -17,6 +17,7 @@ from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
+from sciworld_eto.client import SciworldEtoEnvClient, is_eto as is_sci_eto, load_split as sci_split
 import argparse
 import os
 
@@ -38,6 +39,8 @@ def initialize_environment_webshop(env_server_base: str, data_len: int):
     )
 
 def initialize_environment_sciworld(env_server_base: str, data_len: int):
+    if is_sci_eto():
+        return SciworldEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
     return SciworldEnvClient(
         env_server_base=env_server_base,
         data_len=data_len,
@@ -104,8 +107,13 @@ def process_task(Task, task_inds, train_data, model_name, env, calling, min, max
     """
     # Released code walks range(1000) and skips ids that are not usable; the ETO split is an
     # explicit id list, so slice that instead.
-    train_ids = (load_split("train") if (Task == "webshop" and is_eto())
-                 else [i for i in range(1000)])[min:max]
+    if Task == "webshop" and is_eto():
+        train_ids = load_split("train")                      # ETO WebShop: explicit id list
+    elif Task == "sciworld" and is_sci_eto():
+        train_ids = list(range(len(sci_split("train"))))     # ETO SciWorld: positions in the split
+    else:
+        train_ids = [i for i in range(1000)]                 # released: walk range(1000)
+    train_ids = train_ids[min:max]
     for idx in train_ids:
         if str(idx) in task_inds or str(idx) not in train_data:
             continue
@@ -152,6 +160,11 @@ def main(Task, calling, min, max, task_num, model_name, env_server_base, task_it
     if Task in ["webshop", "textcraft"]:
         task_inds, train_data = load_task_data(Task)
         process_task(Task, task_inds, train_data, model_name, env, calling, min, max)
+    elif Task == "sciworld" and is_sci_eto():
+        # ETO addresses SciWorld by position in its own (task_name, variation_idx) train split,
+        # so the flat [min, max) slice used for WebShop applies directly; the released
+        # process_sciworld walks AgentGym's task_nums/variations instead.
+        process_task(Task, [], {}, model_name, env, calling, min, max)
     elif Task == "sciworld":
         game_nums, task_inds = env.get_game_nums()
         process_sciworld(Task, task_inds, task_num, task_iteration, model_name, env, calling)

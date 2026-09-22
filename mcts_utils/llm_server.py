@@ -186,7 +186,11 @@ def perform_test(calling, env, conv, model_name, idx, max_steps):
 
     os.makedirs(dir_path, exist_ok=True)
     done = False
-    max_steps = max_steps
+    # Co-Evolving gives ScienceWorld a PER-TASK budget (max_steps.json, 10-120) and the reset
+    # response carries it. Agent-R and AgentGym both assume one global number (--max_steps).
+    task_budget = (getattr(env, "info", None) or {}).get("max_steps")
+    if task_budget:
+        max_steps = int(task_budget)
     current_step = 0
     new_env_score = 0
     current_recent_actions = []
@@ -247,7 +251,11 @@ def perform_test_revise(calling, env, conv, model_name, idx, max_steps, content_
     file_path = f"{dir_path}/search_results_{idx}.json"
     os.makedirs(dir_path, exist_ok=True)
     done = False
-    max_steps = max_steps
+    # Co-Evolving gives ScienceWorld a PER-TASK budget (max_steps.json, 10-120) and the reset
+    # response carries it. Agent-R and AgentGym both assume one global number (--max_steps).
+    task_budget = (getattr(env, "info", None) or {}).get("max_steps")
+    if task_budget:
+        max_steps = int(task_budget)
     current_step = 0
     new_env_score = 0
     current_recent_actions = []

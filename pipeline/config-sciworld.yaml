@@ -2,9 +2,9 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35eto                    # short id; child Job names are agr-<run>-i<iter>-<step>-<shard>
+run: q35sci                    # SciWorld on the Co-Evolving (ETO) environment, iteration 1
                                # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
-tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
+tasks: [sciworld]
 
 # WebShop environment protocol. 'eto' = the Co-Evolving / ETO environment the user's Table 3 was
 # produced on: full 1,181,430-product catalogue, 12,087 human goals, ETO's train/test id lists, one
@@ -23,7 +23,7 @@ sciworld_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 3                  # paper: "we conduct Agent-R for three iterations"
+iterations: 1                  # validate iteration 1 first, as with WebShop
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
@@ -159,7 +159,7 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
 
 eval:                          # eval.py
   temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
-  max_steps: 10                # Co-Evolving eval_agent/configs/task/webshop.json, to match the table.
+  max_steps: 100               # fallback only; the env supplies the per-task budget (10-120)
                                # NOTE this is a real handicap for Agent-R: a revision trajectory is
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
@@ -167,7 +167,7 @@ eval:                          # eval.py
   sciworld_split: test         # which column to report: dev = ScienceWorld (Seen), it shares 54
                                # (task, variation) pairs with train; test = (Unseen), sharing none.
                                # Run once per column, with eval.tag set to keep them apart.
-  tag: ""                      # suffix for the result directory, so the same checkpoint can be evaluated
+  tag: "unseen"                      # suffix for the result directory, so the same checkpoint can be evaluated
                                # under more than one protocol without collision (e.g. tag: s100).
   task_limit: 0                # 0 = full 200-item test sets
 
