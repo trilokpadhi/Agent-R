@@ -374,25 +374,34 @@ class Pipeline:
     def strip_icl(self, task, messages):
         """Drop the in-context example from a TRAINING row, keeping it in the prompt.
 
-        Collection and evaluation use Co-Evolving's few-shot prompt (instruction, "OK", then one
-        worked example), so every revise_log/high_log begins with the same 8 ICL messages. Their
-        SFT data does not: ETO's data/webshop_sft.json has exactly 2 identical leading turns across
-        all 1,824 rows -- instruction and "OK" -- then the real task (verified by download, and by
+        Collection and evaluation use Co-Evolving's few-shot prompt - instruction, "OK", then one
+        worked example - so every revise_log/high_log begins with that fixed prefix: 2 + 8 messages
+        for WebShop, 2 + 14 for SciWorld. Their SFT data does not carry it. ETO's
+        data/webshop_sft.json has exactly 2 identical leading turns across all 1,824 rows,
+        instruction and "OK", then the real task (verified by download, and by
         webshop_protocol.replay_expert_dataset keeping row["conversations"][:2]).
 
         Training on the ICL turns would make one fixed demonstration a target in every row, which is
         both a departure from their protocol and a strong memorisation signal. `pred_traj_offset`
         does not apply here: by its own comment it governs the preference dataset, not SFT.
+
+        SciWorld is stripped by the same argument, but note it is NOT verified against ETO's own
+        sciworld_sft.json, which we do not have a copy of - only against the identical structure of
+        the prompt. Set environments.<task>.icl_path to enable this for a task; without it, or
+        under the agentgym protocol, rows are left untouched.
         """
-        if task != "webshop" or self.cfg["webshop_protocol"] != "eto" or not messages:
+        if not messages or self.cfg.get(f"{task}_protocol") != "eto":
             return messages
-        icl = json.loads(Path(self.cfg["environments"]["webshop"]["icl_path"]).read_text())
-        n = len(icl[0])                      # 8 messages: 4 observation/action pairs
+        icl_path = (self.cfg["environments"].get(task) or {}).get("icl_path")
+        if not icl_path:
+            return messages
+        icl = json.loads(Path(icl_path).read_text())
+        n = len(icl[0])                      # WebShop 8, SciWorld 14
         head = 3 if messages[0]["role"] == "system" else 2   # system?, instruction, "OK"
         if len(messages) <= head + n:
             return None
         if messages[head]["content"].strip() not in icl[0][0]["content"].strip():
-            raise RuntimeError(f"expected the ICL example at index {head}, found: "
+            raise RuntimeError(f"{task}: expected the ICL example at index {head}, found: "
                                f"{messages[head]['content'][:120]!r}")
         return messages[:head] + messages[head + n:]
 

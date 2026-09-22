@@ -2,10 +2,10 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: q35eto                    # re-evaluating the EXISTING q35eto checkpoints at 100 steps;
-                               # search/revise/sft are .done so only eval runs.
+run: q35sci                    # SAME run as config-sciworld.yaml: search/revise/sft are
+                               # already .done and are skipped; only the eval step is new.
                                # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
-tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iterations), then run SciWorld separately
+tasks: [sciworld]
 
 # WebShop environment protocol. 'eto' = the Co-Evolving / ETO environment the user's Table 3 was
 # produced on: full 1,181,430-product catalogue, 12,087 human goals, ETO's train/test id lists, one
@@ -13,13 +13,18 @@ tasks: [webshop]              # user (Sep 14): finish WebShop end to end (3 iter
 # (1,000-product subset, its own 200-item split) - the two test sets overlap by 3 of 200, so a
 # number collected on agentgym cannot be compared with that table. See webshop_eto/.
 webshop_protocol: eto
+
+# SciWorld environment protocol. 'eto' = the Co-Evolving environment the table was produced on:
+# simplificationStr="easy", reward = raw_score (0-1) kept as the episode MAXIMUM, their
+# (task_name, variation_idx) splits, per-task step budgets from max_steps.json (10-120).
+# 'agentgym' = the Agent-R maintainers' files: no simplification, reward 0-100, flat data_idx.
+# The 0-1 scale also matters for alpha: path_collection.py compares RAW values, so on a 0-100
+# scale alpha 0.5/0.7/1.0 admits everything and the filter is inert. See sciworld_eto/.
+sciworld_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 3                  # iter1 and iter2 checkpoints exist -> only eval-s100 runs for them.
-                               # iter3 has search/revise/sft-data .done but NO checkpoint: its SFT died on
-                               # 'Disk quota exceeded' before saving, so SFT reruns (~50 min, 1 epoch,
-                               # continuing from iter2) and is then evaluated at 100 steps.
+iterations: 1                  # validate iteration 1 first, as with WebShop
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
@@ -78,7 +83,12 @@ inference:                     # shared by search and revision (eval overrides t
                                # ready in 158s. Two fit with headroom; re-measure before raising env_servers.
   mcts_profile: false          # MCTS_PROFILE=1: per-task timing of prompt_build / llm / deepcopy /
                                # env_replay / env_step, printed to the worker log. Inert when false.
-  mcts_batch_gen: false        # expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
+  mcts_batch_gen: false        # MEASURED HARMFUL, do not enable. At full scale it saved only 9% of search
+                               # (2h23m -> 2h11m) and cost 2.2 points: q35fast iteration 1 scored 49.43
+                               # against 51.66 for the identical pipeline without it. bench-c agreed
+                               # independently (24.5% perfect leaf paths vs 28.7%). vLLM's n=4 shares one
+                               # prefill, so the four candidates correlate and MCTS explores less.
+                               # Kept in the code, off by default. pair_shards is the safe speedup.# expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
                                # Same prompt, same temperature -> same distribution; shares the prefill.
                                # false = the released loop. The authors left this exact idea commented out
                                # in expand() (`self._generate(node, n_generate_samples)`).
@@ -92,7 +102,9 @@ search:                        # mcts_collection.py, released code as-is: same t
   itera: 8                     # paper / maintainer issue #3
   n_gen: 4                     # paper
   webshop_tasks: 300           # paper: 300 WebShop simulations; ids from the code's range(1000)
-  sciworld_task_iteration: 9   # 23 tasks x 9 variations ~= the paper's 200 SciWorld simulations
+  sciworld_tasks: 200          # paper: 200 SciWorld simulations. Under sciworld_protocol: eto these are
+                               # the first 200 positions of Co-Evolving's 1,483-item train split.
+  sciworld_task_iteration: 9   # agentgym protocol only: 23 tasks x 9 variations ~= 200
   seed_trees: {}               # none: the earlier trees were collected with the 500-token cap
 
 revise:                        # path_collection.py --data_type centric --revise 1 (README)
@@ -154,12 +166,15 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
 
 eval:                          # eval.py
   temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
-  max_steps: 100               # the Agent-R paper's budget (page 9), for the collaborator's request
+  max_steps: 100               # fallback only; the env supplies the per-task budget (10-120)
                                # NOTE this is a real handicap for Agent-R: a revision trajectory is
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
                                # rerun eval with 100 afterwards as a supplementary number.
-  tag: "s100"                      # suffix for the result directory, so the same checkpoint can be evaluated
+  sciworld_split: dev          # ScienceWorld (Seen): dev shares 54 (task, variation) pairs with
+                               # the train split. test shares none, which is the (Unseen) column
+                               # reported by config-sciworld.yaml.
+  tag: "seen"                  # separate result directory, so the Unseen eval is not overwritten
                                # under more than one protocol without collision (e.g. tag: s100).
   task_limit: 0                # 0 = full 200-item test sets
 

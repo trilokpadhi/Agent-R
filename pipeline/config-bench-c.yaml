@@ -44,6 +44,10 @@ environments:                  # prebuilt on the PVC; SciWorld uses the maintain
     icl_path: /data/src/webshop-eto/eval_agent/prompt/icl_examples/webshop_icl.json
   sciworld:
     agentenv: /data/src/AgentGym-agentr/agentenv
+    # Under sciworld_protocol: eto the prompt carries instruction + "OK" + one 14-turn worked
+    # example. step_sft_data removes those 14 turns from TRAINING rows (they stay in the
+    # prompt at collection and eval), so a fixed demonstration is not a target in every row.
+    icl_path: /data/src/sciworld-eto/eval_agent/prompt/icl_examples/sciworld_icl.json
 
 inference:                     # shared by search and revision (eval overrides temp below)
   temp: 1                      # paper: expansion temperature 1; also the code's default TEMP (llm_server.py)
