@@ -29,8 +29,18 @@ spec:
           args:
             - |
               set -u
+              # The Secret mounts read-only, but rclone rewrites its config when it refreshes the
+              # Dropbox OAuth token - on a read-only path that fails with "Failed to save config
+              # after 10 tries", so an upload long enough to span a token expiry dies partway.
+              # Copy the config somewhere writable and point rclone at that.
+              cp /config/rclone/rclone.conf /tmp/rclone.conf
+              export RCLONE_CONFIG=/tmp/rclone.conf
               SRC="{{ITER_DIR}}"; DST="{{REMOTE}}/{{RUN}}/iter{{ITER}}"
               # Dropbox: rclone's own guidance is <= 8 transfers and a large chunk size.
+              # --skip-links: the revise step's input/ dirs are symlink farms pointing at the trees,
+              # which are uploaded separately; it also means a symlink is NOT backed up, so never
+              # count on this job alone when deciding something is safe to delete - verify with
+              # `rclone check --one-way` against the local tree.
               OPTS="--transfers 8 --checkers 8 --dropbox-chunk-size 128M --skip-links --stats 2m --stats-one-line --log-level NOTICE"
               # Scratch and duplicate layouts inside a step, never worth uploading.
               EXCL="--exclude partial/** --exclude done/** --exclude input/** --exclude mcts_utils/**"
