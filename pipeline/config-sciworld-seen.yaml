@@ -24,7 +24,8 @@ sciworld_protocol: eto
 namespace: ii400r87
 pvc: tpadhi1
 gpus: 7                        # user decision (only 7 H100s are available to the namespace)
-iterations: 1                  # validate iteration 1 first, as with WebShop
+iterations: 3                  # user decision (Sep 22): everything runs for 3 iterations,
+                               # as the paper does. Iteration 1 is reported when it lands.
 seed: 42
 run_root: /data/runs           # outputs: /data/runs/<run>/iter<N>/<step>
 
