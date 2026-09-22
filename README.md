@@ -85,35 +85,52 @@ pipeline; budget a few hours.
 
 ## What we changed from upstream Agent-R
 
-**New environments.** Upstream targets AgentGym, and **the ETO WebShop test set overlaps
-AgentGym's by 3 items out of 200** — numbers from the two cannot share a table.
+### We swapped the environments
 
-- `webshop_eto/` — full 1,181,430-product catalogue (upstream: 1,000), ETO's id lists, their
-  few-shot prompt (upstream is zero-shot).
-- `sciworld_eto/` — `simplificationStr="easy"`, reward `raw_score` **0–1** kept as the episode max
-  (upstream: 0–100 at the end), tasks as `(task_name, variation_idx)`, **per-task** step budgets
-  10–120 instead of one number.
+Upstream Agent-R runs on **AgentGym**. Every other number in our paper was measured on the
+**ETO / Co-Evolving** versions. These are different benchmarks with the same names:
 
-The 0–1 scale matters for the method, not just comparability: `path_collection.py` compares raw
-values against `alpha`, so on a 0–100 scale the paper's `alpha` admits everything and the
-good-trajectory filter does nothing.
+**The test tasks are not the same.** Both test on 200 WebShop tasks, but only **3 tasks appear in
+both lists** — they are almost entirely different shopping problems. So a score measured on
+AgentGym tells you nothing about a score measured on ETO, and an Agent-R number from AgentGym
+could not be compared against our SFT / RFT / ETO numbers. That is the reason for this fork.
 
-Set `webshop_protocol` / `sciworld_protocol` to `eto` or `agentgym`; both work.
+The environments differ too:
 
-**Bugs fixed in the released code**
+| | ETO (what we use) | AgentGym (upstream) |
+|---|---|---|
+| WebShop products | all 1,181,430 | 1,000 |
+| WebShop prompt | one worked example first | none |
+| ScienceWorld difficulty | easy mode | no simplification |
+| ScienceWorld score | 0–1, best moment of the episode | 0–100, read at the end |
+| ScienceWorld step limit | per task, 10–120 | one limit for all |
 
-- `path_collection.py` compared floats to the **strings** `ALPHA`/`BETA` → `TypeError`.
-- `eval.py` read a `test_id/` directory not in the repo, rebuilt the vLLM engine per task (OOM on
-  task 2), and resumed from a different path than it wrote to.
-- SciWorld sharding walked a 23-entry list, so only the first shard did work and the rest exited
-  **successfully having collected nothing**.
-- `alpha: 1.0` selects **zero** trajectories (`value <= ALPHA`, WebShop reward capped at 1.0). We
-  use `0.999`.
+So we wrote `webshop_eto/` and `sciworld_eto/`. Choose with `webshop_protocol` /
+`sciworld_protocol` = `eto` or `agentgym`; both still run.
 
-**Speed.** `revise.pair_shards` splits a tree's pairs across processes — verified identical rows,
-6h13m → 2h20m. `mcts_batch_gen` looked free but measured **worse** (49.43 vs 51.66), so it's off.
+**The ScienceWorld score scale also breaks the algorithm.** Agent-R keeps a trajectory as a good
+example only if its score beats `alpha` (0.5, then 0.7, then 1.0). Those thresholds assume scores
+run 0–1. On AgentGym's 0–100 scale every trajectory beats 0.5, so the filter meant to keep only
+good trajectories keeps all of them.
 
----
+### Bugs we fixed in the released code
+
+- **`alpha: 1.0` keeps nothing.** The check is "score > alpha", and WebShop's best possible score
+  is exactly 1.0 — so iteration 3 produced **zero** training examples. We use `0.999`, which keeps
+  exactly the perfect trajectories.
+- **SciWorld collection silently did nothing.** The sharding walked a 23-entry task list, so only
+  the first worker had anything to do and the other six exited *successfully* having collected
+  nothing at all.
+- **`eval.py`** looked for a `test_id/` folder that is not in the repo, rebuilt the whole vLLM
+  engine for every task (out of memory on the second one), and checked for finished work in a
+  different folder than it saved to, so it never resumed.
+- **`path_collection.py`** compared numbers against `ALPHA`/`BETA` as text, which crashes.
+
+### Speed
+
+`revise.pair_shards` runs one tree's comparisons in parallel instead of one at a time: **6h13m →
+2h20m**, and we verified it produces the identical output. `mcts_batch_gen` looked like a similar
+free win but scored **worse** (49.43 vs 51.66), so it stays off.
 
 ## Another base model
 
