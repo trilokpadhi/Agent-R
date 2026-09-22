@@ -79,6 +79,7 @@ def main(path):
     emit("EVAL_TAG", (ev.get("tag") or "").strip())
     emit("EVAL_TASK_LIMIT", ev.get("task_limit", 0))
     emit("EVAL_SCIWORLD_SPLIT", ev.get("sciworld_split", "test"))
+    emit("EVAL_STEP_BUDGET_MODE", ev.get("step_budget_mode", "fixed"))
 
     # Shard boundaries come from the controller's OWN methods, not a second implementation: under
     # webshop_protocol: agentgym they are ranges over usable ids (non-contiguous, read from

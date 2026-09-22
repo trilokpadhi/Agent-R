@@ -167,11 +167,17 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
 
 eval:                          # eval.py
   temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
-  max_steps: 100               # fallback only; the env supplies the per-task budget (10-120)
+  max_steps: 100               # paper p.9: "In all three environments, the maximum number of
+                               # rounds is set to 100". With step_budget_mode: fixed this is the
+                               # real limit; under "task" it is ignored for SciWorld.
                                # NOTE this is a real handicap for Agent-R: a revision trajectory is
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
                                # rerun eval with 100 afterwards as a supplementary number.
+  step_budget_mode: fixed      # fixed  = the paper's flat 100 rounds (what we report for Agent-R)
+                               # task   = Co-Evolving's PER-TASK budget from max_steps.json (10-120),
+                               #          which is what their own baselines were measured under.
+                               # Not interchangeable: run each with its own eval.tag and say which.
   sciworld_split: dev          # ScienceWorld (Seen): dev shares 54 (task, variation) pairs with
                                # the train split. test shares none, which is the (Unseen) column
                                # reported by config-sciworld.yaml.

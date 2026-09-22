@@ -159,7 +159,7 @@ class Pipeline:
         }
 
     def inference_env(self, job_name, task, model_dir, workdir, workers, model_type="Raw", temp=None,
-                      sciworld_split="train"):
+                      sciworld_split="train", step_budget_mode="task"):
         """Env block shared by search, revise and eval containers (12-space YAML indent)."""
         c, inf, s = self.cfg, self.cfg["inference"], self.cfg["search"]
         env = {
@@ -198,6 +198,8 @@ class Pipeline:
             # test (Unseen). Must agree with the sidecar, which resolves an index to a
             # (task_name, variation_idx) pair using its own copy of this split.
             "SCIWORLD_SPLIT": sciworld_split,
+            # "fixed" = the paper's flat round limit; "task" = Co-Evolving's per-task budget.
+            "STEP_BUDGET_MODE": step_budget_mode,
             "ENV_SERVERS": inf.get("env_servers", 1),
             "MCTS_BATCH_GEN": "1" if inf.get("mcts_batch_gen") else "0",
             "MCTS_PROFILE": "1" if inf.get("mcts_profile") else "0",
@@ -626,7 +628,8 @@ class Pipeline:
                     "SIDECAR": self.sidecar(task, split=self.cfg["eval"].get("sciworld_split", "test")),
                     "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
                                                      model_type=model_type, temp=e["temp"],
-                                                     sciworld_split=e.get("sciworld_split", "test")),
+                                                     sciworld_split=e.get("sciworld_split", "test"),
+                                                     step_budget_mode=e.get("step_budget_mode", "fixed")),
                     "START_VLLM": self.START_VLLM,
                     "MAX_STEPS": e["max_steps"],
                     "TASK_SHARD": shard,

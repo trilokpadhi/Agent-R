@@ -188,9 +188,14 @@ def perform_test(calling, env, conv, model_name, idx, max_steps):
     done = False
     # Co-Evolving gives ScienceWorld a PER-TASK budget (max_steps.json, 10-120) and the reset
     # response carries it. Agent-R and AgentGym both assume one global number (--max_steps).
-    task_budget = (getattr(env, "info", None) or {}).get("max_steps")
-    if task_budget:
-        max_steps = int(task_budget)
+    # STEP_BUDGET_MODE picks which applies: "fixed" honours --max_steps, which is the Agent-R
+    # paper's protocol ("In all three environments, the maximum number of rounds is set to 100",
+    # p.9); "task" (the default) follows Co-Evolving, which is what its own baselines were
+    # measured under. The two are not interchangeable - report which one a number used.
+    if os.environ.get("STEP_BUDGET_MODE", "task") == "task":
+        task_budget = (getattr(env, "info", None) or {}).get("max_steps")
+        if task_budget:
+            max_steps = int(task_budget)
     current_step = 0
     new_env_score = 0
     current_recent_actions = []
@@ -253,9 +258,14 @@ def perform_test_revise(calling, env, conv, model_name, idx, max_steps, content_
     done = False
     # Co-Evolving gives ScienceWorld a PER-TASK budget (max_steps.json, 10-120) and the reset
     # response carries it. Agent-R and AgentGym both assume one global number (--max_steps).
-    task_budget = (getattr(env, "info", None) or {}).get("max_steps")
-    if task_budget:
-        max_steps = int(task_budget)
+    # STEP_BUDGET_MODE picks which applies: "fixed" honours --max_steps, which is the Agent-R
+    # paper's protocol ("In all three environments, the maximum number of rounds is set to 100",
+    # p.9); "task" (the default) follows Co-Evolving, which is what its own baselines were
+    # measured under. The two are not interchangeable - report which one a number used.
+    if os.environ.get("STEP_BUDGET_MODE", "task") == "task":
+        task_budget = (getattr(env, "info", None) or {}).get("max_steps")
+        if task_budget:
+            max_steps = int(task_budget)
     current_step = 0
     new_env_score = 0
     current_recent_actions = []

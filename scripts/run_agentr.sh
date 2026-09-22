@@ -359,6 +359,8 @@ step_eval() {
     log "iter$it eval $task: $model (max_steps=$EVAL_MAX_STEPS, temp=$EVAL_TEMP, tag='${EVAL_TAG:-none}')"
     mkdir -p "$step_dir/$task"
     export SCIWORLD_SPLIT=$EVAL_SCIWORLD_SPLIT
+    # fixed = the paper's flat round limit (--max_steps); task = Co-Evolving's per-task budget.
+    export STEP_BUDGET_MODE=$EVAL_STEP_BUDGET_MODE
     export_inference_env "$task" "$model" "$model_type" "$EVAL_TEMP"
     [ "$EVAL_TASK_LIMIT" -gt 0 ] && export TASK_LIMIT=$EVAL_TASK_LIMIT
     start_backends "$task" "$model" || die "eval $task: backends did not start"

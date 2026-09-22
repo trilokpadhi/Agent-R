@@ -170,6 +170,10 @@ eval:                          # eval.py
                                # bad prefix + revision + recovery (27 turns in our data), and the
                                # paper evaluates at 100 rounds. Reported at 10 for comparability;
                                # rerun eval with 100 afterwards as a supplementary number.
+  step_budget_mode: fixed      # fixed  = the paper's flat 100 rounds (what we report for Agent-R)
+                               # task   = Co-Evolving's PER-TASK budget from max_steps.json (10-120),
+                               #          which is what their own baselines were measured under.
+                               # Not interchangeable: run each with its own eval.tag and say which.
   sciworld_split: test         # which column to report: dev = ScienceWorld (Seen), it shares 54
                                # (task, variation) pairs with train; test = (Unseen), sharing none.
                                # Run once per column, with eval.tag set to keep them apart.
