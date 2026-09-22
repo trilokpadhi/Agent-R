@@ -67,7 +67,15 @@ spec:
               done
               DONE=$(ls out | wc -l)
               [ "$RC" -eq 0 ] && [ "$DONE" -eq "$TREES" ] || { echo "REVISE_FAILED rc=$RC trees_done=$DONE/$TREES; see $LOG_DIR/$JOB_NAME.*.log"; exit 1; }
-              echo "REVISE_DONE $(date -Is) trees=$DONE rows=$(cat out/*/*.jsonl 2>/dev/null | wc -l)"
+              ROWS=$(cat out/*/*.jsonl 2>/dev/null | wc -l)
+              # Every shard is assembled into out/, so done/ is now a byte-for-byte duplicate of it -
+              # 12 GiB per iteration on the WebShop run, never backed up (the archive step excludes
+              # it), and only ever read to decide whether a (tree, shard) unit still needs doing.
+              # Resume does not depend on it once out/ exists: the first check in the worker is
+              # `[ -d "out/$t" ] && exit 0`. Freeing it here keeps three iterations inside the PVC.
+              FREED=$(du -sh done partial 2>/dev/null | tail -1 | cut -f1)
+              rm -rf done partial
+              echo "REVISE_DONE $(date -Is) trees=$DONE rows=$ROWS freed_scratch=${FREED:-0}"
           resources:
             limits: {nvidia.com/gpu: "1"}
           volumeMounts:
