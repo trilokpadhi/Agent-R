@@ -1,109 +1,108 @@
 # Agent-R on the ETO / Co-Evolving environments
 
-A reproduction of [Agent-R](https://arxiv.org/abs/2501.11425) (ByteDance Seed) on **WebShop** and
-**ScienceWorld**, rebuilt so its numbers are comparable with the ETO / Co-Evolving line of work.
+[Agent-R](https://arxiv.org/abs/2501.11425) (ByteDance Seed), rebuilt to run on the **ETO /
+Co-Evolving** versions of WebShop and ScienceWorld instead of AgentGym.
 
-**Start here: [`scripts/README.md`](scripts/README.md)** — how to run the pipeline, what each step
-does, every deviation from the paper, and the failures worth knowing about before you hit them.
+Full instructions: **[`scripts/README.md`](scripts/README.md)**
+
+## Run it
 
 ```bash
-cp scripts/site.env.example scripts/site.env   # where things live on your machine
-$EDITOR pipeline/config.yaml                   # the method: model, tasks, hyperparameters
+cp scripts/site.env.example scripts/site.env   # your paths
+$EDITOR pipeline/config.yaml                   # model, tasks, hyperparameters
 
 sbatch --export=ALL,CONFIG=pipeline/config.yaml scripts/slurm/agentr.sbatch   # Slurm
-scripts/run_agentr.sh pipeline/config.yaml                                    # or a node you hold
-pipeline/deploy.sh   pipeline/config.yaml                                     # or Kubernetes
+scripts/run_agentr.sh pipeline/config.yaml                                    # a node you hold
+pipeline/deploy.sh   pipeline/config.yaml                                     # Kubernetes
 ```
 
-All three read the same config and resume on rerun.
+All three read the same config and resume if you rerun them.
+
+One iteration = **search** (MCTS trees) → **revise** (revision trajectories) → **sft-data** →
+**sft** (full fine-tune) → **eval**. Three iterations by default.
 
 ---
 
-## Why this is not upstream Agent-R
+## What we changed
 
-Upstream runs against **AgentGym**. The numbers we need to compare with were produced on the
-**ETO / Co-Evolving** environments, and the two are not interchangeable:
+### 1. The environments (the main work)
 
-| | ETO / Co-Evolving | AgentGym (upstream Agent-R) |
-|---|---|---|
-| WebShop catalogue | full 1,181,430 products | 1,000-product subset |
-| WebShop test ids | ETO's `test_indices.json` | AgentGym's own 200 |
-| WebShop prompt | instruction + "OK" + 1 worked example | zero-shot, one hardcoded turn |
-| ScienceWorld | `simplificationStr="easy"`, reward `raw_score` 0–1 kept as episode max | no simplification, reward 0–100 |
-| ScienceWorld tasks | `(task_name, variation_idx)` split files, per-task budgets 10–120 | flat index over 4,639 pairs |
+Upstream targets AgentGym. **The ETO WebShop test set overlaps AgentGym's by 3 items out of 200**,
+so numbers from the two cannot go in the same table. We wrote new environment servers and clients:
 
-**The two WebShop test sets overlap by 3 items out of 200.** A score from one cannot be placed in a
-table beside a score from the other. That is the reason this fork exists.
+**`webshop_eto/`** — full 1,181,430-product catalogue (upstream uses a 1,000-product subset),
+ETO's train/test id lists, and their few-shot prompt (instruction + "OK" + one worked example;
+upstream is zero-shot).
 
-The ScienceWorld reward scale matters for the *method*, not just comparability:
-`path_collection.py` compares raw node values against `alpha`, so on a 0–100 scale the paper's
-`alpha` of 0.5/0.7/1.0 admits every path and the good-trajectory filter silently does nothing.
+**`sciworld_eto/`** — `simplificationStr="easy"`, reward = `raw_score` **0–1** kept as the episode
+maximum (upstream: 0–100 read at the end), tasks addressed as `(task_name, variation_idx)` from
+ETO's split files, and **per-task step budgets** (10–120) instead of one global number. Scoring
+imports Co-Evolving's own monkey patch rather than reimplementing it.
 
-### What was added
+The 0–1 reward scale is not cosmetic: `path_collection.py` compares raw node values against
+`alpha`, so on a 0–100 scale the paper's `alpha` admits every path and the filter does nothing.
 
-| Path | What |
+Both protocols still work — set `webshop_protocol` / `sciworld_protocol` to `eto` or `agentgym`.
+
+### 2. Bugs fixed in the upstream code
+
+- `path_collection.py` compared floats against the **strings** `ALPHA`/`BETA` → `TypeError`.
+- `eval.py` read `test_id/`, which is not in the repo; rebuilt a vLLM engine per task (OOM on the
+  second task); and its resume check looked in a different directory than it wrote to.
+- SciWorld sharding walked a 23-entry task list, so only the first shard did any work and the
+  rest exited successfully having collected **nothing**.
+- `alpha: 1.0` selects **zero** trajectories in iteration 3 — the comparison is `value <= ALPHA`
+  and WebShop reward is capped at 1.0. We use `0.999`, which selects exactly the reward-1.0 paths.
+
+### 3. Made it runnable end to end
+
+**`pipeline/`** (Kubernetes) and **`scripts/`** (Slurm / bare node) run all five steps from one
+config file, with resume: finished steps are skipped, and finished trees and eval items are
+skipped within a step.
+
+### 4. Speed
+
+`revise.pair_shards` splits one tree's pairs across processes with the revision sentences
+pre-drawn in serial order — **verified to produce identical rows**, and cut that step from 6h13m to
+2h20m. `mcts_batch_gen` is the opposite: it looked like a free speedup but measured **worse**
+(49.43 vs 51.66), so it is off by default.
+
+Every deviation from the paper, with its reason, is listed in
+[`scripts/README.md`](scripts/README.md).
+
+---
+
+## Before you start
+
+**Three Python environments** — their dependencies conflict, do not merge them:
+
+| | Contents |
 |---|---|
-| `webshop_eto/` | WebShop server + client on ETO's protocol (full catalogue, their splits, their `step()`) |
-| `sciworld_eto/` | ScienceWorld server + client on ETO's protocol; imports Co-Evolving's own scoring monkey patch rather than reimplementing it |
-| `pipeline/` | One-command orchestration of the 5 steps, with resume, for Kubernetes |
-| `scripts/` | The same pipeline without Kubernetes, for Slurm or a bare node |
+| policy | vLLM, `fschat`, `tiktoken` |
+| env | **Python 3.8** + the environment server (WebShop needs Java 11; ScienceWorld runs a JVM per session) |
+| swift | `ms-swift >= 4.5.3`, `transformers >= 5.2` |
 
-Upstream's own files (`mcts_collection.py`, `path_collection.py`, `eval.py`, `mcts_utils/`) are
-kept, with the protocol handled by a branch rather than a rewrite, so the released code path still
-runs under `*_protocol: agentgym`.
+**Environment data.** For WebShop, the full catalogue **and the prebuilt Lucene index** — download
+the index, don't rebuild it (links in `k8s/webshop-eto-build.yaml`). For ScienceWorld, the split
+files and `max_steps.json` under `eval_agent/data/sciworld`. `k8s/setup/` has the exact build jobs.
 
----
+Budget a few hours for this; it takes longer than the pipeline.
 
-## Environment setup
+## Using another base model
 
-This is the part that takes the longest; budget a few hours the first time.
-
-You need **three Python environments** — their dependencies genuinely conflict, so do not merge them:
-
-- **policy**: vLLM + `fschat` + `tiktoken` (+ `mmengine`). Runs MCTS, revision, and eval.
-- **env**: **Python 3.8** + the environment server. WebShop pins `torch 1.11` / `spaCy 3.3` /
-  `pyserini 0.17` and needs **Java 11**; ScienceWorld runs a **JVM per session**.
-- **swift**: `ms-swift >= 4.5.3` with `transformers >= 5.2`.
-
-And the environment data:
-
-- **WebShop (ETO)** — a Co-Evolving checkout plus the full catalogue and the **prebuilt Lucene
-  index**, both from the ETO Google Drive links used in `k8s/webshop-eto-build.yaml`. Download the
-  index; do not rebuild it.
-- **ScienceWorld (ETO)** — a Co-Evolving checkout; the split files and `max_steps.json` under
-  `eval_agent/data/sciworld` are all that is needed beyond the `scienceworld` package.
-
-`k8s/setup/` and `k8s/webshop-eto-build.yaml` are the exact jobs that built these, usable as a
-recipe on any machine.
-
----
-
-## Running a different base model
-
-`scripts/README.md` has the full checklist. The three that catch people:
-
-1. **Check the trainer can load it before a long run.** Qwen3.5 does not exist in `transformers`
-   4.x at all (`KeyError: 'qwen3_5'`); it needs `>= 5.2`. Hybrid linear-attention models
-   (Qwen3.5, Qwen3-Next) also want `flash-linear-attention` and `causal-conv1d`, or the Gated
-   DeltaNet layers fall back to slow, memory-hungry PyTorch ops — and they require
+1. **`inference.enable_thinking` is Qwen-only.** It is passed to the chat template. For Gemma or
+   Llama leave it **empty** and it won't be sent.
+2. **Keep `bfloat16`** in `sft.dtype` and `inference.vllm_dtype` — Gemma is unstable in fp16.
+3. **Check the trainer loads the model before a long run.** Qwen3.5 needs `transformers >= 5.2`;
+   hybrid linear-attention models also need `flash-linear-attention` + `causal-conv1d` and
    `sft.packing: false`.
-2. **`inference.enable_thinking` is a Qwen concept.** It is passed to the chat template as
-   `chat_template_kwargs`. For a model whose template has no such variable (Gemma, Llama), leave
-   it **empty** in the config and it will not be sent at all.
-3. **Use bfloat16.** `sft.dtype` and `inference.vllm_dtype` are both `bfloat16`; Gemma in
-   particular is numerically unstable in fp16.
-
-Then re-tune `sft.max_length` and `sft.deepspeed` for the model's size — see the OOM notes in
-`scripts/README.md`.
-
----
+4. Re-tune `sft.max_length` and `sft.deepspeed` for the model size (OOM notes in
+   `scripts/README.md`).
 
 ## Status
 
-WebShop is complete for Qwen3.5-9B (3 iterations, evaluated at both a 10-step and a 100-step
-budget). ScienceWorld is running. `pipeline/REPRODUCTION.md` carries the methodology and results.
+WebShop: done for Qwen3.5-9B, 3 iterations, evaluated at 10-step and 100-step budgets.
+ScienceWorld: running. Results and methodology in `pipeline/REPRODUCTION.md`.
 
-The pipeline internals — MCTS, revision, data construction, training, scoring — are what produced
-those numbers. `scripts/run_agentr.sh` re-hosts those same steps off Kubernetes and is **newer and
-less exercised**: expect to debug the launcher rather than the method, and please report anything
-you hit.
+The pipeline internals produced those numbers. `scripts/run_agentr.sh` re-hosts the same steps off
+Kubernetes and is newer — if something breaks there, it is the launcher, not the method.
