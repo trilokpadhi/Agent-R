@@ -105,6 +105,8 @@ The environments differ too:
 | ScienceWorld score | 0–1, best moment of the episode | 0–100, read at the end |
 | ScienceWorld step limit | per task, 10–120 | one limit for all |
 
+**We evaluate at 100 rounds, not the per-task limit** — see *Step limit* below.
+
 So we wrote `webshop_eto/` and `sciworld_eto/`. Choose with `webshop_protocol` /
 `sciworld_protocol` = `eto` or `agentgym`; both still run.
 
@@ -112,6 +114,22 @@ So we wrote `webshop_eto/` and `sciworld_eto/`. Choose with `webshop_protocol` /
 example only if its score beats `alpha` (0.5, then 0.7, then 1.0). Those thresholds assume scores
 run 0–1. On AgentGym's 0–100 scale every trajectory beats 0.5, so the filter meant to keep only
 good trajectories keeps all of them.
+
+### Step limit: we use the paper's 100 rounds
+
+The Agent-R paper is explicit (p.9): *"In all three environments, the maximum number of rounds is
+set to 100."* ETO instead gives each ScienceWorld task its own limit, 10–120, and our code was
+silently using that — a task capped at 10 got 10 rounds however `max_steps` was set, so the 100
+never applied.
+
+`eval.step_budget_mode` now makes it a choice:
+
+- **`fixed`** (default) — `eval.max_steps`, i.e. the paper's 100 rounds. This is what we report.
+- **`task`** — ETO's per-task limit, which is what ETO's own baselines were measured under.
+
+The two give different numbers and are not comparable, so run each with its own `eval.tag` and say
+which one a number came from. Collection and revision still use the per-task limit; only eval
+changed. WebShop is unaffected — it has no per-task limit.
 
 ### Bugs we fixed in the released code
 
