@@ -15,9 +15,14 @@
                 export PYTHONPATH=/data/src/sciworld-eto:/data/src/agentr-pipeline/{{SHA}}
                 export SCIWORLD_ETO_ROOT=/data/src/sciworld-eto
                 export SCIWORLD_SPLIT="{{SCIWORLD_SPLIT}}"
-                export HOST=127.0.0.1 PORT=36001
                 cd /data/src/sciworld-eto
-                exec python /data/src/agentr-pipeline/{{SHA}}/sciworld_eto/server.py
+                # Serve ports 36001..36001+N-1: search.yaml sends worker w to 36001 + w % ENV_SERVERS,
+                # so serving fewer ports than that makes workers fail with connection refused.
+                for i in $(seq 0 $(( {{ENV_SERVERS}} - 1 ))); do
+                  ( export HOST=127.0.0.1 PORT=$((36001 + i))
+                    exec python /data/src/agentr-pipeline/{{SHA}}/sciworld_eto/server.py ) &
+                done
+                wait
               else
                 # AgentGym with the Agent-R maintainers' SciWorld files (issues #5 and #8):
                 # no simplification, reward 0-100, flat data_idx over all 4,639 (task, variation) pairs.
@@ -26,7 +31,7 @@
               fi
           startupProbe:
             exec:
-              command: ["/data/envs/agentenv-sciworld/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:36001/', timeout=3)"]
+              command: ["/data/envs/agentenv-sciworld/bin/python", "-c", "import urllib.request; [urllib.request.urlopen(f'http://127.0.0.1:{36001+i}/', timeout=3) for i in range({{ENV_SERVERS}})]"]
             periodSeconds: 10
             timeoutSeconds: 5
             # ScienceWorld starts a JVM per session; allow headroom for the first load.

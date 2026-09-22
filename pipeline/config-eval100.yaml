@@ -60,7 +60,9 @@ inference:                     # shared by search and revision (eval overrides t
   max_token_length: 8192       # maintainer, issue #8
   enable_thinking: 0           # Agent-R's base model (Llama-3.1) has no thinking mode
   vllm_dtype: bfloat16
-  env_servers: 2               # environment server PROCESSES per GPU, ports 36001..; each search worker is
+  env_servers: 1               # MEASURED: 2 servers per GPU ran 1.13x SLOWER (bench-b 62m08s vs
+                               # bench-a 55m05s) - the environment server was never the bottleneck.
+                               # Must match the sidecar, which serves ports 36001..36001+N-1.# environment server PROCESSES per GPU, ports 36001..; each search worker is
                                # pinned to one (worker % env_servers). Agent-R replays the episode from step 1
                                # on every generation (~11 env calls per model call), and one single-threaded
                                # server doing two BeautifulSoup parses per call was the search bottleneck: the
