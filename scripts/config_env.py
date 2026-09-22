@@ -40,7 +40,10 @@ def main(path):
     emit("TEMP", inf["temp"])
     emit("MAX_TOKEN_LENGTH", inf["max_token_length"])
     emit("MAX_NEW_TOKENS", inf["max_new_tokens"])
-    emit("ENABLE_THINKING", inf["enable_thinking"])
+    # Emitted only when set: see the note in controller.inference_env - a model whose chat
+    # template has no enable_thinking variable must not be sent one.
+    if inf.get("enable_thinking") not in (None, ""):
+        emit("ENABLE_THINKING", inf["enable_thinking"])
     emit("VLLM_DTYPE", inf["vllm_dtype"])
     emit("ENV_SERVERS", inf.get("env_servers", 1))
     emit("MCTS_BATCH_GEN", "1" if inf.get("mcts_batch_gen") else "0")

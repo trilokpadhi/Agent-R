@@ -177,7 +177,12 @@ class Pipeline:
             "TEMP": inf["temp"] if temp is None else temp,
             "MAX_TOKEN_LENGTH": inf["max_token_length"],
             "MAX_NEW_TOKENS": inf["max_new_tokens"],
-            "ENABLE_THINKING": inf["enable_thinking"],
+            # Omitted entirely when the config leaves it null: llm_server only passes
+            # chat_template_kwargs={"enable_thinking": ...} when the variable EXISTS, and
+            # that key is a Qwen concept. A model whose template has no such variable
+            # (Gemma, Llama) should not be sent it at all.
+            **({} if inf.get("enable_thinking") in (None, "") else
+               {"ENABLE_THINKING": inf["enable_thinking"]}),
             "STOP_TOKENS": "",
             "VLLM_DTYPE": inf["vllm_dtype"],
             "VLLM_API_BASE": "http://127.0.0.1:8000/v1",

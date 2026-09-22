@@ -137,8 +137,11 @@ start_backends() {  # start_backends <task> <model> [with_env_server]
 export_inference_env() {  # export_inference_env <task> <model_dir> <model_type> <temp>
   local task=$1
   export TASK=$task MODEL_DIR=$2 MODEL_TYPE=$3 TEMP=$4
-  export MODEL_NAME MAX_DEPTH ITERA N_GEN MAX_TOKEN_LENGTH MAX_NEW_TOKENS ENABLE_THINKING
+  export MODEL_NAME MAX_DEPTH ITERA N_GEN MAX_TOKEN_LENGTH MAX_NEW_TOKENS
   export VLLM_DTYPE MCTS_BATCH_GEN MCTS_PROFILE STOP_TOKENS=""
+  # Only exported when the config sets it; an absent variable means "do not pass
+  # chat_template_kwargs at all", which is what a non-Qwen template needs.
+  [ -n "${ENABLE_THINKING:-}" ] && export ENABLE_THINKING
   export WEBSHOP_PROTOCOL SCIWORLD_PROTOCOL
   export HF_HOME=$AGENTR_HF_HOME HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
