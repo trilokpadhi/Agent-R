@@ -146,7 +146,8 @@ class Pipeline:
             "LOG_DIR": self.logs,
         }
 
-    def inference_env(self, job_name, task, model_dir, workdir, workers, model_type="Raw", temp=None):
+    def inference_env(self, job_name, task, model_dir, workdir, workers, model_type="Raw", temp=None,
+                      sciworld_split="train"):
         """Env block shared by search, revise and eval containers (12-space YAML indent)."""
         c, inf, s = self.cfg, self.cfg["inference"], self.cfg["search"]
         env = {
@@ -176,7 +177,10 @@ class Pipeline:
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "WEBSHOP_PROTOCOL": c["webshop_protocol"],
             "SCIWORLD_PROTOCOL": c.get("sciworld_protocol", "agentgym"),
-            "SCIWORLD_SPLIT": c["eval"].get("sciworld_split", "test"),
+            # Follows the step: search and revise collect on train, eval reports dev (Seen) or
+            # test (Unseen). Must agree with the sidecar, which resolves an index to a
+            # (task_name, variation_idx) pair using its own copy of this split.
+            "SCIWORLD_SPLIT": sciworld_split,
             "ENV_SERVERS": inf.get("env_servers", 1),
             "MCTS_BATCH_GEN": "1" if inf.get("mcts_batch_gen") else "0",
             "MCTS_PROFILE": "1" if inf.get("mcts_profile") else "0",
@@ -278,7 +282,11 @@ class Pipeline:
                 log(f"iter{iteration} search {task}: all {have} trees already present, no jobs needed")
                 return
         else:
-            shards, expected = self.sciworld_shards(), None
+            # Expect a tree per task under the ETO protocol, so a shard that silently collects
+            # nothing fails the step instead of reporting success.
+            expected = self.cfg["search"].get("sciworld_tasks", 200) if \
+                self.cfg.get("sciworld_protocol") == "eto" else None
+            shards = self.sciworld_shards()
             extra = f"--task_iteration {self.cfg['search']['sciworld_task_iteration']}"
         log(f"iter{iteration} search {task}: {len(shards)} shards {shards}, model {model_dir}")
         jobs = []
@@ -570,7 +578,8 @@ class Pipeline:
                 values = self.base_values(name) | {
                     "SIDECAR": self.sidecar(task, split=self.cfg["eval"].get("sciworld_split", "test")),
                     "COMMON_ENV": self.inference_env(name, task, model_dir, step_dir / task, workers=1,
-                                                     model_type=model_type, temp=e["temp"]),
+                                                     model_type=model_type, temp=e["temp"],
+                                                     sciworld_split=e.get("sciworld_split", "test")),
                     "START_VLLM": self.START_VLLM,
                     "MAX_STEPS": e["max_steps"],
                     "TASK_SHARD": shard,

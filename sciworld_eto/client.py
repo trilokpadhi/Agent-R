@@ -59,6 +59,30 @@ def load_split(split):
     return [tuple(x) for x in json.load(open(f"{DATA}/{name}_indices.json"))]
 
 
+def train_order():
+    """Train-split positions, round-robin over task type.
+
+    Agent-R's released SciWorld collection walks task_nums[min:max] and takes variations 1..9 of
+    EACH task, i.e. 23 task types x 9 = 207 simulations spread uniformly over the task types. ETO's
+    train_indices.json is instead grouped by task, so a contiguous [0, 200) prefix is badly skewed:
+    task-2a-test-conductivity alone would be 42 of the 200 while 4 of the 24 types get none.
+
+    Interleaving by type restores the released code's shape on ETO's addressing - the first 200
+    positions become 8-9 variations of every one of the 24 types - while the values are still
+    ETO split positions, which is what env.reset() expects.
+    """
+    tasks = load_split("train")
+    by_type = {}
+    for pos, (task_name, _) in enumerate(tasks):
+        by_type.setdefault(task_name, []).append(pos)
+    order = []
+    for k in range(max(len(v) for v in by_type.values())):
+        for positions in by_type.values():        # dict preserves first-seen task order
+            if k < len(positions):
+                order.append(positions[k])
+    return order
+
+
 class SciworldEtoEnvClient:
     conversation_start = build_conversation_start(icl_num=1)
 

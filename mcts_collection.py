@@ -17,7 +17,8 @@ from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
-from sciworld_eto.client import SciworldEtoEnvClient, is_eto as is_sci_eto, load_split as sci_split
+from sciworld_eto.client import (SciworldEtoEnvClient, is_eto as is_sci_eto,
+                                 load_split as sci_split, train_order as sci_train_order)
 import argparse
 import os
 
@@ -110,7 +111,9 @@ def process_task(Task, task_inds, train_data, model_name, env, calling, min, max
     if Task == "webshop" and is_eto():
         train_ids = load_split("train")                      # ETO WebShop: explicit id list
     elif Task == "sciworld" and is_sci_eto():
-        train_ids = list(range(len(sci_split("train"))))     # ETO SciWorld: positions in the split
+        # Split positions interleaved by task type, so [min:max) spreads over the types the way the
+        # released code's 23 tasks x 9 variations does, instead of taking one task's whole block.
+        train_ids = sci_train_order()
     else:
         train_ids = [i for i in range(1000)]                 # released: walk range(1000)
     train_ids = train_ids[min:max]
@@ -164,7 +167,11 @@ def main(Task, calling, min, max, task_num, model_name, env_server_base, task_it
         # ETO addresses SciWorld by position in its own (task_name, variation_idx) train split,
         # so the flat [min, max) slice used for WebShop applies directly; the released
         # process_sciworld walks AgentGym's task_nums/variations instead.
-        process_task(Task, [], {}, model_name, env, calling, min, max)
+        # train_data is the membership set process_task tests against - passing {} skips every id.
+        # There is nothing to exclude: ETO's train/dev/test files are already disjoint splits.
+        n_train = len(sci_split("train"))
+        process_task(Task, [], {str(i): True for i in range(n_train)},
+                     model_name, env, calling, min, max)
     elif Task == "sciworld":
         game_nums, task_inds = env.get_game_nums()
         process_sciworld(Task, task_inds, task_num, task_iteration, model_name, env, calling)
@@ -199,7 +206,7 @@ def main_script():
         raise ValueError("The TASK environment variable is not set.")
 
     # Process based on the task
-    if Task == "sciworld":
+    if Task == "sciworld" and not is_sci_eto():
         task_nums = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 12,
             13, 17, 18, 19, 20, 21, 22, 25, 26, 27,
@@ -209,7 +216,9 @@ def main_script():
         for current_task_num in task_nums[min_range:max_range]:
             main(Task, calling, min_range, max_range, current_task_num, model_name, env_server_base, task_iteration)
     else:
-        # Handle non-sciworld tasks
+        # webshop, textcraft, and ETO sciworld all take a flat [min, max) slice of an explicit id
+        # list, so main() runs once. Slicing the 23-entry task_nums here instead would give every
+        # shard above the 23rd position an empty range - and the first shard 23 duplicate passes.
         main(Task, calling, min_range, max_range, task_num, model_name, env_server_base, task_iteration)
 
 if __name__ == "__main__":
