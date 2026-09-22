@@ -18,7 +18,7 @@ K='export PATH="$HOME/.local/bin:$PATH"; timeout 300 kubectl -n ii400r87'
 cd "$(git rev-parse --show-toplevel)"
 # Only committed code is deployed (git archive HEAD). Refuse if code the jobs run has uncommitted
 # changes, so nobody believes an edit is running when it is not; other changes are just reported.
-CODE_PATHS=(pipeline webshop_eto mcts_utils mcts_collection.py path_collection.py eval.py)
+CODE_PATHS=(pipeline webshop_eto sciworld_eto mcts_utils mcts_collection.py path_collection.py eval.py)
 if [ -n "$(git status --porcelain -- "${CODE_PATHS[@]}")" ]; then
   echo "Commit your changes first: these files are used by the jobs and are not committed:" >&2
   git status --short -- "${CODE_PATHS[@]}" >&2
