@@ -1,0 +1,50 @@
+# Push every WebShop asset to Dropbox: both runs, all iterations, in full.
+#   q35eto   the reported run - 3 iterations, trees, revision rows, SFT data, checkpoints,
+#            eval at BOTH 10 and 100 steps, logs
+#   q35fast  the speedup validation - 1 iteration, same contents
+# rclone copy never deletes on the remote and skips unchanged files, so it is safe to rerun.
+#   kubectl apply -n ii400r87 -f k8s/archive-webshop.yaml
+#   kubectl logs -n ii400r87 -f job/archive-webshop-001
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: archive-webshop-001
+  labels: {project: agent-r, step: archive}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 172800
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels: {project: agent-r, step: archive}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: rclone
+          image: rclone/rclone:1.71.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              OPTS="--transfers 8 --checkers 8 --dropbox-chunk-size 128M --skip-links --stats 5m --stats-one-line --log-level NOTICE"
+              # scratch and duplicate layouts only; everything of record is uploaded
+              EXCL="--exclude partial/** --exclude done/** --exclude input/** --exclude mcts_utils/** --exclude manifests/**"
+              DST=dropbox:agent-r/webshop
+              rclone about dropbox: | sed 's/^/  dropbox: /'
+              rc=0
+              for r in q35eto q35fast; do
+                [ -d "/data/runs/$r" ] || { echo "skip $r (absent)"; continue; }
+                echo "== $r ($(du -sh /data/runs/$r | cut -f1))"
+                rclone copy "/data/runs/$r" "$DST/$r" $OPTS $EXCL && echo "DONE_$r" || rc=1
+              done
+              echo "== remote =="
+              for r in q35eto q35fast; do printf "  %-8s " "$r"; rclone size "$DST/$r" --json 2>/dev/null; echo; done
+              if [ $rc -eq 0 ]; then echo ARCHIVE_WEBSHOP_DONE; else echo ARCHIVE_WEBSHOP_FAILED; exit 1; fi
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: rclone-conf, mountPath: /config/rclone, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
+        - name: rclone-conf
+          secret: {secretName: rclone-dropbox}
