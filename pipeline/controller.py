@@ -43,7 +43,12 @@ def run(args, stdin=None, check=True, retries=3):
 
 
 def load_config(path):
-    return json.loads(run(["yq", "-o=json", ".", str(path)]).stdout)
+    """yq if present (the controller image has it), else PyYAML - so the same config file can be
+    read off-cluster by scripts/run_agentr.sh on a machine that only has Python."""
+    if shutil.which("yq"):
+        return json.loads(run(["yq", "-o=json", ".", str(path)]).stdout)
+    import yaml  # noqa: PLC0415 - optional, only needed off-cluster
+    return yaml.safe_load(Path(path).read_text())
 
 
 def split_evenly(items, parts):
@@ -551,6 +556,27 @@ class Pipeline:
         except RuntimeError as e:
             log(f"iter{iteration} archive: FAILED - non-fatal, continuing. {e}")
 
+    def score_eval(self, iteration, model_dir=None, model_type=None):
+        """Mean env_score per task over an iteration's eval results.
+
+        WebShop's env_score is 0-1 and the table reports percent; ETO SciWorld's raw_score is
+        already 0-1 kept as the episode maximum, and is reported on the same 0-1 scale x100
+        elsewhere - `reported` follows how each column appears in the paper table.
+        """
+        tag = (self.cfg["eval"].get("tag") or "").strip()
+        step_dir = self.root / f"iter{iteration}" / ("eval" + (f"-{tag}" if tag else ""))
+        # Same construction step_eval uses, so calling this standalone finds the same directory.
+        model_type = model_type or (f"agentr-iter{iteration}" + (f"-{tag}" if tag else ""))
+        summary = {"model_dir": model_dir, "iteration": iteration, "model_type": model_type}
+        for task in self.tasks:
+            out = step_dir / task / "test_result" / task / f"{self.cfg['model']['name']}_{model_type}"
+            results = list(out.glob("search_results_*.json"))
+            scores = [json.load(open(p))["env_score"] for p in results]
+            mean = sum(scores) / len(scores) if scores else float("nan")
+            summary[task] = {"items": len(scores), "mean_env_score": mean,
+                             "reported": mean * 100 if task == "webshop" else mean}
+        return summary
+
     def step_eval(self, iteration, model_dir):
         # The tag is part of the STEP directory, not just the results directory: otherwise a
         # re-evaluation under a different protocol would find the previous run's .done and skip.
@@ -589,14 +615,7 @@ class Pipeline:
                 jobs.append((name, self.render("eval.yaml", values)))
         log(f"iter{iteration} eval: {model_dir}")
         self.run_jobs(jobs)
-        summary = {"model_dir": model_dir}
-        for task in self.tasks:
-            results = list((step_dir / task / "test_result" / task / f"{self.cfg['model']['name']}_{model_type}")
-                           .glob("search_results_*.json"))
-            scores = [json.load(open(p))["env_score"] for p in results]
-            mean = sum(scores) / len(scores) if scores else float("nan")
-            summary[task] = {"items": len(scores), "mean_env_score": mean,
-                             "reported": mean * 100 if task == "webshop" else mean}
+        summary = self.score_eval(iteration, model_dir=model_dir, model_type=model_type)
         self.mark_done(step_dir, summary)
         log(f"iter{iteration} eval: {summary}")
 
@@ -631,9 +650,20 @@ if __name__ == "__main__":
     parser.add_argument("--config", required=True)
     parser.add_argument("--code-dir", required=True)
     parser.add_argument("--sha", required=True)
+    # Steps that are pure Python and need no Kubernetes, so scripts/run_agentr.sh (Slurm, bare
+    # node, anything) calls THIS implementation rather than keeping a second copy of it.
+    parser.add_argument("--step", default="all", choices=["all", "sft-data", "score"],
+                        help="all = the full pipeline (needs kubectl); sft-data and score do not")
+    parser.add_argument("--iteration", type=int, default=1)
     args = parser.parse_args()
     try:
-        Pipeline(load_config(args.config), args.code_dir, args.sha).main()
+        pipeline = Pipeline(load_config(args.config), args.code_dir, args.sha)
+        if args.step == "sft-data":
+            print(pipeline.step_sft_data(args.iteration))
+        elif args.step == "score":
+            print(json.dumps(pipeline.score_eval(args.iteration), indent=2))
+        else:
+            pipeline.main()
     except Exception as exc:  # the Job's log should end with the reason
         log(f"PIPELINE_FAILED: {exc}")
         sys.exit(1)
