@@ -98,8 +98,33 @@ def child(task):
         raise SystemExit("ExtendedMCTS.load returned None - its final `return dict_to_node(...)` "
                          "is missing; path_collection will crash on root.value")
 
+    # env_action decides what reaches the environment. Splitting "Action:" off a reply breaks any
+    # environment whose own parser needs that marker - which is how the InterCode-SQL smoke run
+    # scored 0 on every task while looking healthy.
+    from mcts_utils.llm_server import env_action
+    reply = ("Thought: t\nAction: \n```sql\nSELECT 1\n```" if task == "intercode_sql"
+             else "Thought: t\nAction: look")
+    sent = env_action(reply)
+    if task in ("intercode_sql", "webshop"):
+        if sent != reply:
+            raise SystemExit(f"env_action must pass the raw reply for {task} under eto; "
+                             f"it sent {sent!r}")
+    if task == "intercode_sql":
+        # Their parser needs mysql.connector, which only the environment image has. Where it is
+        # importable, use it; otherwise assert the one property that actually broke - the marker
+        # the parser keys on must still be there.
+        sys.path.insert(0, os.environ["INTERCODE_ETO_ROOT"])
+        try:
+            from eval_agent.intercode_sql_action import parse_sql_action
+        except ImportError:
+            import re
+            if len(re.findall(r"(?m)^Action:", sent)) != 1:
+                raise SystemExit("env_action stripped the Action: marker InterCode requires")
+        else:
+            parse_sql_action(sent)      # raises if the environment would refuse it
+
     print(f"{type(client).__name__} conversation_start={len(type(client).conversation_start)} "
-          f"load_ok={root.value}")
+          f"load_ok={root.value} env_action_ok=1")
 
 
 # ---------------------------------------------------------------- parent

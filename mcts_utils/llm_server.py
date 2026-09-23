@@ -174,7 +174,14 @@ def env_action(agent_response):
     silent no-op by whether the marker is present - a distinction that is destroyed by splitting
     here. See webshop_eto/server.py.
     """
-    if os.environ.get("TASK") == "webshop" and os.environ.get("WEBSHOP_PROTOCOL", "").lower() == "eto":
+    task = os.environ.get("TASK")
+    if task == "webshop" and os.environ.get("WEBSHOP_PROTOCOL", "").lower() == "eto":
+        return agent_response
+    if task == "intercode_sql" and os.environ.get("INTERCODE_PROTOCOL", "").lower() == "eto":
+        # Stricter still: InterCode's parser REQUIRES exactly one "^Action:" marker and then a
+        # fenced ```sql block. Splitting the marker off here makes every action unparseable, so the
+        # environment answers "I don't understand your input" to everything and the episode burns
+        # its whole budget scoring 0. mcts_sql.py passes the reply unsplit for the same reason.
         return agent_response
     return agent_response.split('Action:')[-1].strip()
 
