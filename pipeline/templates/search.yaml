@@ -55,3 +55,8 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: {claimName: {{PVC}}}
+        # Only the InterCode-SQL sidecar mounts this: MySQL needs a writable data directory of its
+        # own, and the shared PVC cannot serve as one. The database is rebuilt from spider_all.sql
+        # at every start, so nothing here needs to survive the Pod. Unused by other tasks.
+        - name: mysql-data
+          emptyDir: {sizeLimit: 8Gi}

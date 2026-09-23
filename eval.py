@@ -18,6 +18,8 @@ from mcts_utils.llm_server import *
 from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
 from sciworld_eto.client import SciworldEtoEnvClient, is_eto as is_sci_eto, load_split as sci_split
+from intercode_sql_eto.client import (IntercodeSqlEtoEnvClient,
+                                      is_eto as is_sql_eto, load_split as sql_split)
 import argparse
 import os
 
@@ -27,6 +29,8 @@ if Task == "webshop":
     from mcts_utils.webshop.mcts_ws import *
 elif Task == "sciworld":
     from mcts_utils.sciworld.mcts_sci import *
+elif Task == "intercode_sql":
+    from mcts_utils.intercode_sql.mcts_sql import *
 elif Task == "textcraft":
     from mcts_utils.textcraft.mcts_tc import *
 
@@ -42,6 +46,8 @@ def initialize_environment(Task: str, env_server_base: str, data_len: int = 200)
         if is_sci_eto():
             return SciworldEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
         return SciworldEnvClient(env_server_base=env_server_base, data_len=data_len)
+    elif Task == "intercode_sql":
+        return IntercodeSqlEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
     elif Task == "textcraft":
         return TextCraftEnvClient(env_server_base=env_server_base, data_len=data_len)
     else:
@@ -53,7 +59,8 @@ def setup_conversation(env):
     """
     conv = get_conversation_template('gpt-4')
     replay_conversation_start(conv, env)
-    observation = env.observe() if os.environ["TASK"] == "webshop" else env.info["observation"]
+    observation = (env.observe() if os.environ["TASK"] in ("webshop", "intercode_sql")
+                   else env.info["observation"])
     conv.append_message(conv.roles[0], observation)
     return conv
 
@@ -75,6 +82,9 @@ def main(Task: str, model_name: str, env_server_base: str, max_steps: int):
         # positions in that split; the server resolves them to (task_name, variation_idx).
         split = os.environ.get("SCIWORLD_SPLIT", "test")
         task_inds = [str(i) for i in range(len(sci_split(split)))]
+    elif Task == "intercode_sql":
+        # 200 positions in their test_indices.json; the server resolves each to a spider record.
+        task_inds = [str(i) for i in range(len(sql_split("test")))]
     else:
         test_file = f"test_id/{Task}_test.json"
         if not os.path.exists(test_file):

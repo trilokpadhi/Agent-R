@@ -194,6 +194,7 @@ class Pipeline:
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "WEBSHOP_PROTOCOL": c["webshop_protocol"],
             "SCIWORLD_PROTOCOL": c.get("sciworld_protocol", "agentgym"),
+            "INTERCODE_PROTOCOL": c.get("intercode_protocol", "eto"),
             # Follows the step: search and revise collect on train, eval reports dev (Seen) or
             # test (Unseen). Must agree with the sidecar, which resolves an index to a
             # (task_name, variation_idx) pair using its own copy of this split.
@@ -227,7 +228,9 @@ class Pipeline:
                                                     "ENV_MEMORY_LIMIT": inf.get("env_memory_limit", "96Gi"),
                                                     "WEBSHOP_PROTOCOL": self.cfg["webshop_protocol"],
                                                     "SCIWORLD_PROTOCOL": self.cfg.get("sciworld_protocol", "agentgym"),
+                                                    "IMAGE_MYSQL": self.cfg["images"].get("mysql", "mysql:8.0.32"),
                                                     "SCIWORLD_SPLIT": split or "train",
+                                                    "INTERCODE_SPLIT": split or "train",
                                                     "SHA": self.sha})
 
     def done(self, step_dir):
@@ -273,6 +276,11 @@ class Pipeline:
         n = min(self.cfg["search"].get("sciworld_tasks", SCIWORLD_TASK_NUMS), SCIWORLD_TASK_NUMS)
         return [(c[0], c[-1] + 1) for c in split_evenly(list(range(n)), self.cfg["gpus"])]
 
+    def intercode_sql_shards(self):
+        """(min, max) pairs, one per GPU: positions in Co-Evolving's InterCode-SQL train split."""
+        n = self.cfg["search"].get("intercode_sql_tasks", 300)
+        return [(c[0], c[-1] + 1) for c in split_evenly(list(range(n)), self.cfg["gpus"])], n
+
     # ---------- steps ----------
     def trees_dir(self, iteration, task):
         return self.root / f"iter{iteration}" / f"search-{task}" / "mcts_result" / task / self.cfg["model"]["name"]
@@ -300,6 +308,9 @@ class Pipeline:
                 self.mark_done(step_dir, {"trees": have, "model_dir": model_dir, "seeded_from": seed})
                 log(f"iter{iteration} search {task}: all {have} trees already present, no jobs needed")
                 return
+        elif task == "intercode_sql":
+            shards, expected = self.intercode_sql_shards()
+            extra = ""
         else:
             # Expect a tree per task under the ETO protocol, so a shard that silently collects
             # nothing fails the step instead of reporting success.

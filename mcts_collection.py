@@ -19,6 +19,8 @@ from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClien
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
 from sciworld_eto.client import (SciworldEtoEnvClient, is_eto as is_sci_eto,
                                  load_split as sci_split, train_order as sci_train_order)
+from intercode_sql_eto.client import (IntercodeSqlEtoEnvClient,
+                                      is_eto as is_sql_eto, load_split as sql_split)
 import argparse
 import os
 
@@ -28,6 +30,8 @@ if Task == "webshop":
     from mcts_utils.webshop.mcts_ws import *
 elif Task == "sciworld":
     from mcts_utils.sciworld.mcts_sci import *
+elif Task == "intercode_sql":
+    from mcts_utils.intercode_sql.mcts_sql import *
 elif Task == "textcraft":
     from mcts_utils.textcraft.mcts_tc import *
 
@@ -46,6 +50,9 @@ def initialize_environment_sciworld(env_server_base: str, data_len: int):
         env_server_base=env_server_base,
         data_len=data_len,
     )
+
+def initialize_environment_intercode_sql(env_server_base: str, data_len: int):
+    return IntercodeSqlEtoEnvClient(env_server_base=env_server_base, data_len=data_len)
 
 def initialize_environment_textcraft(env_server_base: str, data_len: int):
     return TextCraftEnvClient(
@@ -110,6 +117,8 @@ def process_task(Task, task_inds, train_data, model_name, env, calling, min, max
     # explicit id list, so slice that instead.
     if Task == "webshop" and is_eto():
         train_ids = load_split("train")                      # ETO WebShop: explicit id list
+    elif Task == "intercode_sql":
+        train_ids = list(range(len(sql_split("train"))))     # positions in ETO's train split
     elif Task == "sciworld" and is_sci_eto():
         # Split positions interleaved by task type, so [min:max) spreads over the types the way the
         # released code's 23 tasks x 9 variations does, instead of taking one task's whole block.
@@ -163,6 +172,12 @@ def main(Task, calling, min, max, task_num, model_name, env_server_base, task_it
     if Task in ["webshop", "textcraft"]:
         task_inds, train_data = load_task_data(Task)
         process_task(Task, task_inds, train_data, model_name, env, calling, min, max)
+    elif Task == "intercode_sql":
+        # Like WebShop: a flat [min, max) slice of an explicit id list - here positions in
+        # Co-Evolving's train_indices.json (1,500 after de-duplication).
+        n_train = len(sql_split("train"))
+        process_task(Task, [], {str(i): True for i in range(n_train)},
+                     model_name, env, calling, min, max)
     elif Task == "sciworld" and is_sci_eto():
         # ETO addresses SciWorld by position in its own (task_name, variation_idx) train split,
         # so the flat [min, max) slice used for WebShop applies directly; the released

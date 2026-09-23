@@ -27,6 +27,8 @@ if Task == "webshop":
     from mcts_utils.webshop.mcts_ws import *
 elif Task == "sciworld":
     from mcts_utils.sciworld.mcts_sci import *
+elif Task == "intercode_sql":
+    from mcts_utils.intercode_sql.mcts_sql import *
 elif Task == "textcraft":
     from mcts_utils.textcraft.mcts_tc import *
 

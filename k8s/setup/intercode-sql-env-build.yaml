@@ -1,0 +1,123 @@
+# Build the InterCode-SQL environment onto the PVC, once.
+#
+#   kubectl apply -n ii400r87 -f k8s/setup/intercode-sql-env-build.yaml
+#
+# Creates /data/envs/agentenv-intercode-sql and self-tests it against a throwaway MySQL sidecar
+# loaded from the same spider_all.sql the real runs use, so a failure shows up here rather than
+# inside a GPU job.
+#
+# The environment DATA (spider dump, index files, prompts, their action parser) is uploaded
+# separately from the Co-Evolving checkout - see REPRODUCTION.md - to /data/src/intercode-sql-eto.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: intercode-sql-env-build-001
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 259200
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # MySQL for the self-test only. Same image and flags as the real sidecar.
+        - name: mysql
+          image: mysql:8.0.32
+          restartPolicy: Always
+          args: ["--lower_case_table_names=1"]
+          env:
+            - {name: MYSQL_ROOT_PASSWORD, value: "password"}
+          volumeMounts:
+            - name: data
+              mountPath: /docker-entrypoint-initdb.d/spider_all.sql
+              subPath: src/intercode-sql-eto/eval_agent/data/intercode_sql/spider_all.sql
+              readOnly: true
+            - {name: mysql-data, mountPath: /var/lib/mysql}
+          startupProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-u", "admin", "-padmin"]
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests: {memory: 2Gi}
+            limits: {memory: 8Gi}
+      containers:
+        - name: build
+          image: condaforge/miniforge3:24.3.0-0
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              ENV=/data/envs/agentenv-intercode-sql
+              if [ ! -x "$ENV/bin/python" ]; then
+                echo "== creating $ENV"
+                conda create -y -p "$ENV" -c conda-forge python=3.10
+              fi
+              source /opt/conda/etc/profile.d/conda.sh && conda activate "$ENV"
+
+              echo "== dependencies"
+              # intercode-bench brings gymnasium/numpy/pandas/rich; scipy is imported by sql_env.
+              # `docker` is imported at module load by intercode.utils even though we never use a
+              # daemon (intercode_sql_eto/server.py stubs the one call), so it must be importable.
+              pip install --no-input \
+                intercode-bench==0.1.22 \
+                docker \
+                mysql-connector-python \
+                scipy pandas \
+                fastapi uvicorn requests
+
+              echo "== versions"
+              python - <<'EOF'
+              import docker, intercode, mysql.connector, fastapi, scipy, pandas
+              print("intercode", getattr(intercode, "__version__", "?"),
+                    "| mysql-connector", mysql.connector.__version__,
+                    "| fastapi", fastapi.__version__)
+              from mysql.connector._scripting import split_multi_statement   # their parser needs this
+              print("split_multi_statement importable: yes")
+              EOF
+
+              echo "== self-test against the MySQL sidecar"
+              cd /data/src/intercode-sql-eto
+              PYTHONPATH=/data/src/intercode-sql-eto:/data/src/agentr-test python - <<'EOF'
+              import os
+              os.environ.setdefault("INTERCODE_ETO_ROOT", "/data/src/intercode-sql-eto")
+              os.environ.setdefault("INTERCODE_SPLIT", "test")
+              os.environ.setdefault("MYSQL_HOST", "127.0.0.1")
+              from intercode_sql_eto.server import Sessions, preprocess_sql   # applies the stub
+              from eval_agent.intercode_sql_action import parse_sql_action
+
+              S = Sessions()
+              sid = S.create()
+              env = S.envs[sid]
+              record_idx = S.tasks[0]
+              env.cnx.rollback(); env.reset(record_idx); env.cnx.start_transaction(readonly=True)
+              print("task:", env.query)
+              print("gold:", env.gold[:90])
+
+              # A wrong query should score below 1; the gold query should score exactly 1.
+              action, is_submit = parse_sql_action("Action:\\n```sql\\nSELECT 1\\n```")
+              obs, r, done, _ = env.step(action)
+              print("after a wrong query -> reward", r, "done", done)
+              env.step(env.gold)
+              _, reward, done, _ = env.step("submit")
+              print("after the GOLD query + submit -> reward", reward, "done", done)
+              assert done and abs(reward - 1.0) < 1e-9, f"gold query must score 1.0, got {reward}"
+
+              # The parser must refuse anything that is not a single read-only statement.
+              for bad in ("Action:\\n```sql\\nDROP TABLE x\\n```",
+                          "Action:\\n```sql\\nSELECT 1; SELECT 2\\n```",
+                          "no action here"):
+                  try:
+                      parse_sql_action(bad); raise SystemExit(f"parser accepted: {bad!r}")
+                  except ValueError:
+                      pass
+              print("parser rejects writes, multi-statements and malformed input: yes")
+              EOF
+              echo "INTERCODE_SQL_ENV_BUILD_PASSED"
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
+        - name: mysql-data
+          emptyDir: {sizeLimit: 8Gi}

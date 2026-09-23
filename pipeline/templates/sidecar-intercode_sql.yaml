@@ -1,0 +1,65 @@
+        # InterCode-SQL is TWO sidecars: the MySQL server that is the environment, and the HTTP
+        # server Agent-R talks to. Upstream InterCode starts MySQL itself through the Docker API,
+        # which a Pod cannot do; but SqlEnv only calls Docker to obtain the container object
+        # (ic_env.py get_container) and never uses it again - reset_container() is a no-op for SQL.
+        # So MySQL runs as a normal sidecar here and intercode_sql_eto/server.py stubs that one call.
+        - name: mysql
+          image: {{IMAGE_MYSQL}}
+          restartPolicy: Always
+          # lower_case_table_names can only be set when the data directory is initialised; the
+          # spider dump and the gold queries disagree on table-name case without it.
+          args: ["--lower_case_table_names=1", "--max_connections=512"]
+          env:
+            - {name: MYSQL_ROOT_PASSWORD, value: "password"}
+          volumeMounts:
+            - name: data
+              mountPath: /docker-entrypoint-initdb.d/spider_all.sql
+              subPath: src/intercode-sql-eto/eval_agent/data/intercode_sql/spider_all.sql
+              readOnly: true
+            # MySQL needs a writable data directory, and the PVC is shared across pods. The whole
+            # database is rebuilt from the 3.5 MB dump at startup, so it is disposable.
+            - {name: mysql-data, mountPath: /var/lib/mysql}
+          startupProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-u", "admin", "-padmin"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # Importing 118 databases from the dump takes a few minutes on first start; the probe
+            # only passes once the admin user spider_all.sql creates actually exists.
+            failureThreshold: 90
+          resources:
+            requests: {memory: 2Gi}
+            limits: {memory: 8Gi}
+        - name: env-server
+          image: {{IMAGE_ENV_SERVER}}
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate /data/envs/agentenv-intercode-sql
+              export PYTHONPATH=/data/src/intercode-sql-eto:/data/src/agentr-pipeline/{{SHA}}
+              export INTERCODE_ETO_ROOT=/data/src/intercode-sql-eto
+              export INTERCODE_SPLIT="{{INTERCODE_SPLIT}}"
+              export MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=admin MYSQL_PASSWORD=admin
+              cd /data/src/intercode-sql-eto
+              # Serve ports 36001..36001+N-1: search.yaml sends worker w to 36001 + w % ENV_SERVERS.
+              for i in $(seq 0 $(( {{ENV_SERVERS}} - 1 ))); do
+                ( export HOST=127.0.0.1 PORT=$((36001 + i))
+                  exec python /data/src/agentr-pipeline/{{SHA}}/intercode_sql_eto/server.py ) &
+              done
+              wait
+          startupProbe:
+            exec:
+              command: ["/data/envs/agentenv-intercode-sql/bin/python", "-c", "import urllib.request; [urllib.request.urlopen(f'http://127.0.0.1:{36001+i}/', timeout=3) for i in range({{ENV_SERVERS}})]"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # Waits on MySQL coming up first, so allow the same headroom as the database.
+            failureThreshold: 120
+          resources:
+            requests: {memory: 2Gi}
+            limits: {memory: 8Gi}
+          volumeMounts:
+            - name: data
+              mountPath: /data
