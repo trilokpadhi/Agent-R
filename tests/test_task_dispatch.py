@@ -29,8 +29,12 @@ CASES = [
 
 # ---------------------------------------------------------------- child
 class _Resp:
-    def __init__(self, payload):
+    """Enough of requests.Response for the clients: they check status_code before json()."""
+
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
+        self.text = ""
 
     def raise_for_status(self):
         pass
@@ -48,10 +52,14 @@ def _install_stubs():
                           "done": False, "max_steps": 20})
         return _Resp({"observation": "an observation", "reward": 0.0, "score": 0.0, "done": False})
 
+    # The clients retry on requests' own exception types, so the stub must expose them.
     sys.modules["requests"] = types.SimpleNamespace(
         post=post,
         get=lambda *a, **k: _Resp({"look_around": "", "inventory": "",
-                                   "get_valid_action_object_combinations": ""}))
+                                   "get_valid_action_object_combinations": ""}),
+        HTTPError=type("HTTPError", (Exception,), {}),
+        ConnectionError=type("ConnectionError", (Exception,), {}),
+        Timeout=type("Timeout", (Exception,), {}))
     for name in ("tiktoken", "openai", "numpy"):
         sys.modules.setdefault(name, types.ModuleType(name))
     mmengine = types.ModuleType("mmengine")

@@ -11,6 +11,7 @@ Their intercode_sql_icl.json holds 3 examples of 8 turns; we use the first, as t
 """
 import json
 import os
+import time
 from dataclasses import dataclass
 
 import requests
@@ -82,19 +83,34 @@ class IntercodeSqlEtoEnvClient:
     def observe(self):
         return self.info["observation"]
 
+    def _post(self, path, payload, attempts=4):
+        """Retry a transient server error instead of killing the worker.
+
+        MCTS resets once per generation, so a shard makes tens of thousands of these calls over
+        hours. A single 5xx - a dropped MySQL connection, a moment of contention between the 43
+        workers sharing this server - used to fail the whole shard and with it the pipeline step.
+        4xx is not retried: that is a bad request, and repeating it will not help.
+        """
+        last = None
+        for attempt in range(attempts):
+            try:
+                r = requests.post(f"{self.env_server_base}/{path}", json=payload, timeout=self.timeout)
+                if r.status_code < 500:
+                    r.raise_for_status()
+                    return r.json()
+                last = requests.HTTPError(f"{r.status_code} {r.text[:200]}")
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last = exc
+            time.sleep(2 ** attempt)          # 1s, 2s, 4s
+        raise last
+
     def reset(self, data_idx=0):
-        r = requests.post(f"{self.env_server_base}/reset",
-                          json={"id": self.env_id, "data_idx": int(data_idx)}, timeout=self.timeout)
-        r.raise_for_status()
-        self.info = r.json()
+        self.info = self._post("reset", {"id": self.env_id, "data_idx": int(data_idx)})
         return self.info
 
     def step(self, action):
         # The raw reply goes to the server, which runs Co-Evolving's parse_sql_action on it: the
         # action is a fenced SQL block, so splitting on "Action:" here would break the fence.
-        r = requests.post(f"{self.env_server_base}/step",
-                          json={"id": self.env_id, "action": action}, timeout=self.timeout)
-        r.raise_for_status()
-        self.info = r.json()
+        self.info = self._post("step", {"id": self.env_id, "action": action})
         return StepOutput(state=self.info["observation"], reward=float(self.info["reward"]),
                           done=bool(self.info["done"]))

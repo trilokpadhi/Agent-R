@@ -30,7 +30,7 @@ import json
 import os
 from typing import Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 ETO_ROOT = os.environ.get("INTERCODE_ETO_ROOT", "/data/src/intercode-sql-eto")
@@ -61,6 +61,22 @@ class _NoContainer:
 _ic_env.get_container = lambda *a, **k: _NoContainer()   # the one Docker call in the whole path
 
 from intercode.envs import SqlEnv  # noqa: E402
+from intercode.utils import data_loader as _data_loader  # noqa: E402
+
+# Every SqlEnv builds its own IntercodeDataLoader, which reads the 6 MB spider file through pandas.
+# With one session per worker that is ~43 identical copies per pod, and 43 slow startups. The data
+# is read-only, so cache the parsed frame per path and hand every session the same one.
+_FRAMES = {}
+_load_data_once = _data_loader.IntercodeDataLoader._load_data
+
+
+def _cached_load_data(self):
+    if self.data_path not in _FRAMES:
+        _FRAMES[self.data_path] = _load_data_once(self)
+    return _FRAMES[self.data_path]
+
+
+_data_loader.IntercodeDataLoader._load_data = _cached_load_data
 
 from eval_agent.intercode_sql_action import parse_sql_action  # noqa: E402  (Co-Evolving's parser)
 
@@ -138,18 +154,52 @@ def create():
     return {"id": S.create()}
 
 
-@app.post("/reset")
-def reset(body: ResetBody):
-    env = S.envs[body.id]
-    record_idx = S.tasks[int(body.data_idx) % len(S.tasks)]
+def _reconnect(env):
+    """Replace this session's MySQL connection. InterCode stores the error text on the env and
+    raises a generic RuntimeError, so a broken connection is otherwise indistinguishable from a
+    bad query - and a session that loses its connection can never reset again."""
+    import mysql.connector
+    for handle in ("cur", "cnx"):
+        try:
+            getattr(env, handle).close()
+        except Exception:
+            pass
+    env.cnx = mysql.connector.connect(**_sql_env.SQL_CONFIG)
+    env.cur = env.cnx.cursor(buffered=True)
+
+
+def _begin_episode(env, record_idx):
     # End the previous episode and make the new one read-only, as Co-Evolving's env.reset does:
     # even if an unsafe statement bypasses the parser, MySQL rejects persistent mutation.
     try:
         env.cnx.rollback()
     except Exception:
         pass
-    env.reset(record_idx)
+    env.reset(record_idx)                    # runs "use <db>"; raises if that fails
     env.cnx.start_transaction(readonly=True)
+
+
+@app.post("/reset")
+def reset(body: ResetBody):
+    env = S.envs[body.id]
+    record_idx = S.tasks[int(body.data_idx) % len(S.tasks)]
+    try:
+        _begin_episode(env, record_idx)
+    except Exception as first:
+        # Under load (43 workers share one server here) a connection can be dropped or left with a
+        # transaction MySQL will not let us leave. Rebuild the session and try once more, and if
+        # that fails too, report the MySQL text InterCode hid on env.observation instead of its
+        # generic "Preprocess command failed".
+        detail = getattr(env, "observation", None)
+        print(f"reset({record_idx}) failed: {first!r} mysql={detail!r}; reconnecting", flush=True)
+        _reconnect(env)
+        try:
+            _begin_episode(env, record_idx)
+        except Exception as second:
+            raise HTTPException(
+                status_code=503,
+                detail=(f"reset({record_idx}) failed twice: {second}; "
+                        f"mysql said: {getattr(env, 'observation', None)!r}")) from second
     S.info[body.id] = {
         "observation": env.query,          # the natural-language question
         "record_idx": record_idx,
