@@ -98,6 +98,8 @@ def initialize_environment(Task, env_server_base, data_len = 200):
         return initialize_environment_webshop(env_server_base, data_len)
     elif Task == "sciworld":
         return initialize_environment_sciworld(env_server_base, data_len)
+    elif Task == "intercode_sql":
+        return initialize_environment_intercode_sql(env_server_base, data_len)
     elif Task == "textcraft":
         return initialize_environment_textcraft(env_server_base, data_len)
     else:
