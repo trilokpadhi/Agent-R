@@ -251,3 +251,5 @@ class ExtendedMCTS(MCTSAgent):
             node = ExtendedNode(**data)
             node.children = [dict_to_node(child) for child in children_data]
             return node
+
+        return dict_to_node(state_dict)

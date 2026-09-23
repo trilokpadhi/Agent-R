@@ -83,7 +83,23 @@ def child(task):
     step = client.step(action)
     if step is None or not hasattr(step, "reward"):
         raise SystemExit("step() did not return a StepOutput")
-    print(f"{type(client).__name__} conversation_start={len(type(client).conversation_start)}")
+
+    # ExtendedMCTS.load must return the reconstructed root. Dropping its final return is silent
+    # until revise runs and path_collection does `root.value` on None - which is how the
+    # InterCode-SQL smoke run failed on its third attempt.
+    module = sys.modules[mcts_collection.ExtendedMCTS.__module__]
+    module.mmengine.load = lambda _p: {
+        "visits": 1, "value": 0.5, "prior": 1, "puct_value": 0.0, "obs": "", "llm_response": "ROOT",
+        "depth": 0, "is_terminal": False, "recent_actions": [], "action": "ROOT", "env_score": 0,
+        "disaster": False, "state": [], "children": [],
+    }
+    root = mcts_collection.ExtendedMCTS.load("ignored")
+    if root is None or not hasattr(root, "value"):
+        raise SystemExit("ExtendedMCTS.load returned None - its final `return dict_to_node(...)` "
+                         "is missing; path_collection will crash on root.value")
+
+    print(f"{type(client).__name__} conversation_start={len(type(client).conversation_start)} "
+          f"load_ok={root.value}")
 
 
 # ---------------------------------------------------------------- parent
