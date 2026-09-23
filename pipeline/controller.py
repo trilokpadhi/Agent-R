@@ -656,6 +656,15 @@ class Pipeline:
 
     # ---------- main ----------
     def main(self):
+        # alpha and epochs are indexed by iteration, so a config asking for more iterations than
+        # they define dies with IndexError partway through the extra iteration - after its search
+        # and revise have already run. Say so before anything starts.
+        for key, values in (("revise.alpha", self.cfg["revise"]["alpha"]),
+                            ("sft.epochs", self.cfg["sft"]["epochs"])):
+            if len(values) < self.cfg["iterations"]:
+                raise RuntimeError(
+                    f"iterations={self.cfg['iterations']} but {key} has {len(values)} entries "
+                    f"({values}). Add one value per iteration - the paper only defines three.")
         self.logs.mkdir(parents=True, exist_ok=True)
         # A run may be resumed after a fix is committed: every launch is recorded here, and every
         # step's .done names the commit that produced it.
