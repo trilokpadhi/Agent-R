@@ -95,7 +95,7 @@ spec:
               print("gold:", env.gold[:90])
 
               # A wrong query should score below 1; the gold query should score exactly 1.
-              action, is_submit = parse_sql_action("Action:\\n```sql\\nSELECT 1\\n```")
+              action, is_submit = parse_sql_action("Action:\n```sql\nSELECT 1\n```")
               obs, r, done, _ = env.step(action)
               print("after a wrong query -> reward", r, "done", done)
               env.step(env.gold)
@@ -104,8 +104,8 @@ spec:
               assert done and abs(reward - 1.0) < 1e-9, f"gold query must score 1.0, got {reward}"
 
               # The parser must refuse anything that is not a single read-only statement.
-              for bad in ("Action:\\n```sql\\nDROP TABLE x\\n```",
-                          "Action:\\n```sql\\nSELECT 1; SELECT 2\\n```",
+              for bad in ("Action:\n```sql\nDROP TABLE x\n```",
+                          "Action:\n```sql\nSELECT 1; SELECT 2\n```",
                           "no action here"):
                   try:
                       parse_sql_action(bad); raise SystemExit(f"parser accepted: {bad!r}")
