@@ -15,7 +15,14 @@ limitations under the License.
 """
 from fastchat.model.model_adapter import get_conversation_template
 from mcts_utils.llm_server import *
-from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
+try:
+    from agentenv.envs import WebshopEnvClient, SciworldEnvClient, TextCraftEnvClient
+except ModuleNotFoundError:
+    # agentenv is only needed by the AgentGym protocols. The eto clients do not import it, and an
+    # InterCode-SQL run has no reason to put AgentGym on PYTHONPATH at all - so a missing agentenv
+    # must not stop the module loading. The branches below that use these names are unreachable
+    # unless the corresponding protocol is selected, and that requires agentenv to be installed.
+    WebshopEnvClient = SciworldEnvClient = TextCraftEnvClient = None
 from webshop_eto.client import WebshopEtoEnvClient, is_eto, load_split, replay_conversation_start
 from sciworld_eto.client import (SciworldEtoEnvClient, is_eto as is_sci_eto,
                                  load_split as sci_split, train_order as sci_train_order)
