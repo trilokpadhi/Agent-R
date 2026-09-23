@@ -4,7 +4,11 @@
 # Every setting the pipeline uses lives here. Each value names its source.
 # Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
 
-run: sqlsmoke                  # separate run dir, so it never touches the real q35sql run
+run: sqlsmoke2                 # separate run dir, so it never touches the real q35sql run.
+                               # Bumped: .done markers are the resume mechanism, so a rerun
+                               # after a code fix must use a NEW name (or have its run dir
+                               # removed) or every step is skipped and the stale result is
+                               # reported as if fresh.
                                # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
 tasks: [intercode_sql]
 
