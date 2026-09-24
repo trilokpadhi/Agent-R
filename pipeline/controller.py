@@ -500,6 +500,11 @@ class Pipeline:
                 return ckpt
             log(f"iter{iteration} sft: .done points at {ckpt}, which is gone - retraining")
             (step_dir / ".done").unlink()
+            # The Job still exists and is still marked succeeded, and run_jobs keeps a succeeded
+            # Job rather than resubmitting it - so clearing the marker alone makes the step a no-op
+            # that then fails on "no checkpoint". Remove the Job too, so it actually reruns.
+            run(["kubectl", "delete", "job", self.job_name(iteration, "sft"), "-n", self.ns,
+                 "--ignore-not-found", "--wait=true"])
         s, gpus = self.cfg["sft"], self.cfg["gpus"]
         if not s.get("max_length"):
             raise RuntimeError("sft.max_length is not set: revision rows measured 4,297-19,651 tokens "
