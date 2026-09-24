@@ -100,14 +100,21 @@ spec:
               EOF
 
               echo "== the real test: vLLM must load it and generate"
-              VLLM_WORKER_MULTIPROC_METHOD=spawn python3 - <<'EOF'
+              # VLLM_WORKER_MULTIPROC_METHOD=spawn re-imports the script in a subprocess, so it must
+              # be a FILE with a __main__ guard - a heredoc piped to "python3 -" dies with
+              # FileNotFoundError: '<stdin>'. Same trap as the very first vLLM smoke test here.
+              cat > /tmp/vllm_check.py <<'EOF'
               from vllm import LLM, SamplingParams
-              llm = LLM(model="/data/models/gemma-3-12b-it-text", dtype="bfloat16",
-                        gpu_memory_utilization=0.85, max_model_len=4096)
-              out = llm.chat([[{"role": "user", "content": "Reply with exactly: OK"}]],
-                             SamplingParams(temperature=0, max_tokens=16))
-              print("VLLM REPLY:", repr(out[0].outputs[0].text.strip()))
+
+              if __name__ == "__main__":
+                  llm = LLM(model="/data/models/gemma-3-12b-it-text", dtype="bfloat16",
+                            gpu_memory_utilization=0.85, max_model_len=4096)
+                  out = llm.chat([[{"role": "user", "content": "Reply with exactly: OK"}]],
+                                 SamplingParams(temperature=0, max_tokens=16))
+                  print("VLLM REPLY:", repr(out[0].outputs[0].text.strip()))
               EOF
+              sed -i 's/^              //' /tmp/vllm_check.py
+              VLLM_WORKER_MULTIPROC_METHOD=spawn python3 /tmp/vllm_check.py
               echo GEMMA3_V4_EXTRACT_DONE
           env:
             - name: HF_TOKEN
