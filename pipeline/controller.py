@@ -490,8 +490,16 @@ class Pipeline:
         step_dir = self.root / f"iter{iteration}" / "sft"
         if self.done(step_dir):
             ckpt = json.loads((step_dir / ".done").read_text())["checkpoint"]
-            log(f"iter{iteration} sft: done, checkpoint {ckpt}")
-            return ckpt
+            # A .done marker is not proof the checkpoint is still there. Iterations continue from
+            # the previous checkpoint, so freeing one to reclaim disk leaves a marker pointing at a
+            # path that no longer exists, and the NEXT iteration's SFT dies with
+            # "path: ... not found" after its search and revise have already run. Retrain instead:
+            # the training set is kept, so this costs time rather than data.
+            if Path(ckpt).exists():
+                log(f"iter{iteration} sft: done, checkpoint {ckpt}")
+                return ckpt
+            log(f"iter{iteration} sft: .done points at {ckpt}, which is gone - retraining")
+            (step_dir / ".done").unlink()
         s, gpus = self.cfg["sft"], self.cfg["gpus"]
         if not s.get("max_length"):
             raise RuntimeError("sft.max_length is not set: revision rows measured 4,297-19,651 tokens "
