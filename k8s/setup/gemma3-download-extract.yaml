@@ -1,0 +1,132 @@
+# Download google/gemma-3-12b-it and extract its text tower, once.
+#
+#   kubectl apply -n ii400r87 -f k8s/setup/gemma3-download-extract.yaml
+#
+# Gemma-3-12B ships as Gemma3ForConditionalGeneration: a vision tower plus a language model. Our
+# pipeline serves with vLLM and trains with ms-swift, both of which want a plain causal LM, so the
+# language tower is saved as a standalone Gemma3ForCausalLM - the same step Co-Evolving takes
+# (scripts/extract_gemma3_text.py; their NEW_MODELS.md says to always use the "-text" path).
+#
+# CPU only: the model is loaded on CPU in bf16, so this needs RAM, not a GPU.
+# The gated download needs the `hf-token` Secret, created from the user's own terminal.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemma3-download-extract-001
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  ttlSecondsAfterFinished: 259200
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: prep
+          # ms-swift image: transformers 5.16, which knows Gemma3ForConditionalGeneration.
+          image: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope@sha256:cb8aadb783de32cd9df894b0d44b96161b31bed78d1eeafd59e9563a518743c3
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              export HF_HOME=/data/models/huggingface
+              SRC_ID=google/gemma-3-12b-it
+              OUT=/data/models/gemma-3-12b-it-text
+
+              if [ -f "$OUT/config.json" ]; then
+                echo "already extracted at $OUT"; ls -la "$OUT"; echo GEMMA3_PREP_DONE; exit 0
+              fi
+
+              echo "== free space before"; df -h /data | tail -1
+
+              echo "== downloading $SRC_ID (gated; uses the hf-token Secret)"
+              python - <<'EOF'
+              import os
+              from huggingface_hub import snapshot_download
+              path = snapshot_download(
+                  "google/gemma-3-12b-it",
+                  token=os.environ["HF_TOKEN"],
+                  # weights, config and tokenizer only - no .pth/.msgpack duplicates
+                  allow_patterns=["*.safetensors", "*.json", "*.model", "*.txt", "*.jinja"],
+              )
+              print("SNAPSHOT", path)
+              open("/tmp/snapshot_path", "w").write(path)
+              EOF
+              SRC=$(cat /tmp/snapshot_path)
+              echo "== snapshot at $SRC"; du -sh "$SRC"
+
+              echo "== extracting the text tower -> $OUT"
+              # Co-Evolving's scripts/extract_gemma3_text.py, reproduced.
+              SRC="$SRC" OUT="$OUT" python - <<'EOF'
+              import os
+              import torch
+              from transformers import AutoTokenizer, Gemma3ForCausalLM, Gemma3ForConditionalGeneration
+
+              src, out = os.environ["SRC"], os.environ["OUT"]
+              print(f"loading {src} (cpu, bf16)...", flush=True)
+              cg = Gemma3ForConditionalGeneration.from_pretrained(
+                  src, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+
+              lm = Gemma3ForCausalLM(cg.config.text_config).to(torch.bfloat16)
+              remapped = {}
+              for k, v in cg.state_dict().items():
+                  if "vision_tower" in k or "multi_modal_projector" in k:
+                      continue
+                  if k.startswith("model.language_model."):
+                      remapped["model." + k[len("model.language_model."):]] = v
+                  elif k.startswith("language_model.model."):
+                      remapped["model." + k[len("language_model.model."):]] = v
+                  elif k.startswith("language_model.lm_head."):
+                      remapped["lm_head." + k[len("language_model.lm_head."):]] = v
+                  elif k.startswith("lm_head."):
+                      remapped[k] = v
+                  else:
+                      print(f"  skipping unrecognized key: {k}")
+              missing, unexpected = lm.load_state_dict(remapped, strict=False)
+              real_missing = [k for k in missing if k != "lm_head.weight"]
+              assert not real_missing, f"missing keys: {real_missing[:5]}"
+              assert not unexpected, f"unexpected keys: {unexpected[:5]}"
+              if "lm_head.weight" in missing:
+                  assert lm.config.tie_word_embeddings, "untied lm_head but weights missing"
+                  lm.tie_weights()
+
+              tok = AutoTokenizer.from_pretrained(src)
+              ids = tok("<start_of_turn>user\nhello<end_of_turn>\n", return_tensors="pt").input_ids
+              with torch.no_grad():
+                  logits = lm(ids).logits
+              print("smoke forward OK, logits:", tuple(logits.shape), flush=True)
+
+              lm.generation_config = cg.generation_config
+              lm.save_pretrained(out)
+              tok.save_pretrained(out)
+              print("model_type:", lm.config.model_type, "| architectures:", lm.config.architectures)
+              EOF
+
+              echo "== the extracted checkpoint must load as a plain causal LM"
+              OUT="$OUT" python - <<'EOF'
+              import os, json
+              cfg = json.load(open(os.path.join(os.environ["OUT"], "config.json")))
+              print("model_type:", cfg.get("model_type"), "architectures:", cfg.get("architectures"))
+              assert cfg.get("model_type") == "gemma3_text", cfg.get("model_type")
+              assert "vision_config" not in cfg, "vision tower still present"
+              EOF
+
+              echo "== dropping the multimodal download; only the text tower is used from here"
+              rm -rf "$SRC"
+              du -sh "$OUT"; df -h /data | tail -1
+              echo GEMMA3_PREP_DONE
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: hf-token, key: token}
+            - {name: HF_HUB_ENABLE_HF_TRANSFER, value: "0"}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+          resources:
+            # 12B in bf16 is ~24 GiB resident, and the extraction holds both the source model and
+            # the new one briefly.
+            requests: {memory: 48Gi, cpu: "4"}
+            limits: {memory: 96Gi, cpu: "8"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
