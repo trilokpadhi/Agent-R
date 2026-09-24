@@ -141,6 +141,9 @@ sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms
                                # zero2 is viable now that max_length is 16384 (not 20480) and the allocator
                                # uses expandable segments, which recovered the 12.7 GiB lost to fragmentation.
   packing: false               # required: Qwen3.5 linear attention does not support packing
+  attn_impl: flash_attn       # Gemma-3 must use 'eager': interleaved sliding-window
+                              # attention breaks with flash-attn on some transformers
+                              # builds (Co-Evolving README, Troubleshooting).
   loss_scale: default          # all assistant turns get loss, as in the released code (user decision)
 
 eval:                          # eval.py

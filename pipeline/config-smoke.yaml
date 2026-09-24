@@ -75,6 +75,9 @@ sft:
   per_device_batch: 8          # SMOKE
   deepspeed: zero2
   packing: false
+  attn_impl: flash_attn       # Gemma-3 must use 'eager': interleaved sliding-window
+                              # attention breaks with flash-attn on some transformers
+                              # builds (Co-Evolving README, Troubleshooting).
   loss_scale: default
 
 eval:

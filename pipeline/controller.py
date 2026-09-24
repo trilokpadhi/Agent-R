@@ -518,6 +518,7 @@ class Pipeline:
             "LR": s["learning_rate"], "WARMUP": s["warmup_ratio"], "WEIGHT_DECAY": s["weight_decay"],
             "MAX_GRAD_NORM": s["max_grad_norm"], "ADAM_BETA1": s["adam_beta1"], "ADAM_BETA2": s["adam_beta2"],
             "DEEPSPEED": s["deepspeed"], "SEED": self.cfg["seed"],
+            "ATTN_IMPL": s.get("attn_impl", "flash_attn"),
         }
         log(f"iter{iteration} sft: from {model_dir}, {s['epochs'][iteration - 1]} epoch(s), "
             f"batch {s['per_device_batch']} x {grad_accum} x {gpus} GPUs")
