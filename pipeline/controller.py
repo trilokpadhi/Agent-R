@@ -500,11 +500,6 @@ class Pipeline:
                 return ckpt
             log(f"iter{iteration} sft: .done points at {ckpt}, which is gone - retraining")
             (step_dir / ".done").unlink()
-            # The Job still exists and is still marked succeeded, and run_jobs keeps a succeeded
-            # Job rather than resubmitting it - so clearing the marker alone makes the step a no-op
-            # that then fails on "no checkpoint". Remove the Job too, so it actually reruns.
-            run(["kubectl", "delete", "job", self.job_name(iteration, "sft"), "-n", self.ns,
-                 "--ignore-not-found", "--wait=true"])
         s, gpus = self.cfg["sft"], self.cfg["gpus"]
         if not s.get("max_length"):
             raise RuntimeError("sft.max_length is not set: revision rows measured 4,297-19,651 tokens "
@@ -526,6 +521,12 @@ class Pipeline:
         }
         log(f"iter{iteration} sft: from {model_dir}, {s['epochs'][iteration - 1]} epoch(s), "
             f"batch {s['per_device_batch']} x {grad_accum} x {gpus} GPUs")
+        # run_jobs keeps a Job that is marked succeeded, so a Job whose checkpoint has since been
+        # deleted would be "kept" and the step would then fail on "no checkpoint". Judge by the
+        # output, not by the Job's status or by .done - either of which can outlive the weights.
+        if self.job_state(name) == "succeeded" and not list(out.glob("checkpoint-*")):
+            log(f"iter{iteration} sft: Job {name} succeeded but its checkpoint is gone - resubmitting")
+            run(["kubectl", "delete", "job", name, "-n", self.ns, "--ignore-not-found", "--wait=true"])
         self.run_jobs([(name, self.render("sft.yaml", values))])
         ckpts = sorted(out.glob("checkpoint-*"), key=lambda p: int(p.name.split("-")[-1]))
         if not ckpts:
