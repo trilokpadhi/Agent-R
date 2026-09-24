@@ -1,0 +1,127 @@
+# Re-extract Gemma-3's text tower using the vLLM image's transformers, and prove vLLM loads it.
+#
+#   kubectl apply -n ii400r87 -f k8s/setup/gemma3-reextract-v4.yaml
+#
+# The first extraction ran in the ms-swift image (transformers 5.16), which writes the v5 config
+# format: a nested "rope_parameters" block. The vLLM image has transformers 4.57 and rejects it with
+#   ValidationError: rope_parameters should have a 'rope_type' key
+# so every search shard died before loading the model.
+#
+# transformers v5 can read a v4 config, but not the reverse, so the checkpoint is written by the
+# OLDER one - the vLLM image - and ms-swift reads it happily afterwards. This is the same
+# v4/v5 split that already forced prepare_checkpoint_for_vllm to copy the base model's config files
+# onto every fine-tuned checkpoint.
+#
+# No download: the blobs are still in the HF cache, so snapshot_download only relinks them.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemma3-reextract-v4-001
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 14400
+  ttlSecondsAfterFinished: 259200
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      containers:
+        - name: extract
+          image: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              rm -f /etc/ld.so.conf.d/cuda-compat.conf && ldconfig   # host driver, not the image's compat libcuda
+              export HF_HOME=/data/models/huggingface
+              OUT=/data/models/gemma-3-12b-it-text
+              python3 -c "import transformers; print('transformers', transformers.__version__)"
+
+              echo "== relinking the snapshot from the cached blobs (no re-download)"
+              python3 - <<'EOF'
+              import os
+              from huggingface_hub import snapshot_download
+              path = snapshot_download(
+                  "google/gemma-3-12b-it", token=os.environ["HF_TOKEN"],
+                  allow_patterns=["*.safetensors", "*.json", "*.model", "*.txt", "*.jinja"])
+              open("/tmp/src", "w").write(path)
+              print("SNAPSHOT", path)
+              EOF
+              SRC=$(cat /tmp/src)
+
+              echo "== extracting with transformers 4.x so the config is the format vLLM reads"
+              SRC="$SRC" OUT="$OUT" python3 - <<'EOF'
+              import os, torch
+              from transformers import AutoTokenizer, Gemma3ForCausalLM, Gemma3ForConditionalGeneration
+              src, out = os.environ["SRC"], os.environ["OUT"]
+              cg = Gemma3ForConditionalGeneration.from_pretrained(
+                  src, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+              lm = Gemma3ForCausalLM(cg.config.text_config).to(torch.bfloat16)
+              remapped = {}
+              for k, v in cg.state_dict().items():
+                  if "vision_tower" in k or "multi_modal_projector" in k:
+                      continue
+                  if k.startswith("model.language_model."):
+                      remapped["model." + k[len("model.language_model."):]] = v
+                  elif k.startswith("language_model.model."):
+                      remapped["model." + k[len("language_model.model."):]] = v
+                  elif k.startswith("language_model.lm_head."):
+                      remapped["lm_head." + k[len("language_model.lm_head."):]] = v
+                  elif k.startswith("lm_head."):
+                      remapped[k] = v
+                  else:
+                      print(f"  skipping unrecognized key: {k}")
+              missing, unexpected = lm.load_state_dict(remapped, strict=False)
+              real_missing = [k for k in missing if k != "lm_head.weight"]
+              assert not real_missing, f"missing keys: {real_missing[:5]}"
+              assert not unexpected, f"unexpected keys: {unexpected[:5]}"
+              if "lm_head.weight" in missing:
+                  assert lm.config.tie_word_embeddings
+                  lm.tie_weights()
+              tok = AutoTokenizer.from_pretrained(src)
+              ids = tok("<start_of_turn>user\nhello<end_of_turn>\n", return_tensors="pt").input_ids
+              with torch.no_grad():
+                  print("smoke forward OK, logits:", tuple(lm(ids).logits.shape))
+              lm.generation_config = cg.generation_config
+              lm.save_pretrained(out)
+              tok.save_pretrained(out)
+              EOF
+
+              echo "== config must be the v4 shape"
+              OUT="$OUT" python3 - <<'EOF'
+              import json, os
+              c = json.load(open(os.path.join(os.environ["OUT"], "config.json")))
+              print("transformers_version:", c.get("transformers_version"))
+              print("model_type:", c.get("model_type"), "| architectures:", c.get("architectures"))
+              assert c.get("model_type") == "gemma3_text", c.get("model_type")
+              assert "vision_config" not in c, "vision tower still present"
+              assert "rope_parameters" not in c, "still the v5 rope format vLLM cannot read"
+              EOF
+
+              echo "== the real test: vLLM must load it and generate"
+              VLLM_WORKER_MULTIPROC_METHOD=spawn python3 - <<'EOF'
+              from vllm import LLM, SamplingParams
+              llm = LLM(model="/data/models/gemma-3-12b-it-text", dtype="bfloat16",
+                        gpu_memory_utilization=0.85, max_model_len=4096)
+              out = llm.chat([[{"role": "user", "content": "Reply with exactly: OK"}]],
+                             SamplingParams(temperature=0, max_tokens=16))
+              print("VLLM REPLY:", repr(out[0].outputs[0].text.strip()))
+              EOF
+              echo GEMMA3_V4_EXTRACT_DONE
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: hf-token, key: token}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+          resources:
+            limits: {nvidia.com/gpu: "1", memory: 96Gi}
+            requests: {memory: 48Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: tpadhi1}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 32Gi}
