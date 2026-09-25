@@ -90,6 +90,11 @@ def main(path):
     for task in c["tasks"]:
         if task == "webshop":
             shards, expected = pipeline.webshop_shards()
+        elif task == "intercode_sql":
+            # Without this branch the else fell through to sciworld_shards(), so an InterCode run
+            # under Slurm would have collected 200 tasks instead of 300 - a different experiment
+            # from the Kubernetes one, silently.
+            shards, expected = pipeline.intercode_sql_shards()
         else:
             shards = pipeline.sciworld_shards()
             expected = s.get("sciworld_tasks", 200) if c.get("sciworld_protocol") == "eto" else 0
