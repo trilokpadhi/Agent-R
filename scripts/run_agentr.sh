@@ -147,6 +147,14 @@ export_inference_env() {  # export_inference_env <task> <model_dir> <model_type>
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
   local agentenv_var="AGENTENV_${task^^}"
   export PYTHONPATH="$REPO:${!agentenv_var}:$AGENTR_POLICY_SITE"
+  # The eto clients read their prompt and split files at IMPORT time, from these roots. On the
+  # Kubernetes cluster the built-in defaults (/data/src/...) happen to be correct, so nothing sets
+  # them; anywhere else the policy side dies with FileNotFoundError on sciworld_inst.txt before it
+  # runs a single task. Export whichever the site defines.
+  [ -n "${AGENTR_WEBSHOP_ETO_ROOT:-}" ]   && export WEBSHOP_ETO_ROOT="$AGENTR_WEBSHOP_ETO_ROOT"
+  [ -n "${AGENTR_SCIWORLD_ETO_ROOT:-}" ]  && export SCIWORLD_ETO_ROOT="$AGENTR_SCIWORLD_ETO_ROOT"
+  [ -n "${AGENTR_INTERCODE_ETO_ROOT:-}" ] && export INTERCODE_ETO_ROOT="$AGENTR_INTERCODE_ETO_ROOT"
+  return 0
 }
 
 latest_checkpoint() {  # highest checkpoint-<n> under $1, by number
