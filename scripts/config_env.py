@@ -33,6 +33,7 @@ def main(path):
     emit("BASE_MODEL_DIR", c["model"]["base_dir"])
     emit("WEBSHOP_PROTOCOL", c["webshop_protocol"])
     emit("SCIWORLD_PROTOCOL", c.get("sciworld_protocol", "agentgym"))
+    emit("INTERCODE_PROTOCOL", c.get("intercode_protocol", "eto"))
 
     for task, spec in c["environments"].items():
         emit(f"AGENTENV_{task.upper()}", spec["agentenv"])

@@ -142,7 +142,7 @@ export_inference_env() {  # export_inference_env <task> <model_dir> <model_type>
   # Only exported when the config sets it; an absent variable means "do not pass
   # chat_template_kwargs at all", which is what a non-Qwen template needs.
   [ -n "${ENABLE_THINKING:-}" ] && export ENABLE_THINKING
-  export WEBSHOP_PROTOCOL SCIWORLD_PROTOCOL
+  export WEBSHOP_PROTOCOL SCIWORLD_PROTOCOL INTERCODE_PROTOCOL
   export HF_HOME=$AGENTR_HF_HOME HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
   local agentenv_var="AGENTENV_${task^^}"
