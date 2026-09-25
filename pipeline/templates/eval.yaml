@@ -23,8 +23,9 @@ spec:
           env:
 {{COMMON_ENV}}
             - {name: MAX_STEPS, value: "{{MAX_STEPS}}"}
-            - {name: TASK_SHARD, value: "{{TASK_SHARD}}"}
-            - {name: TASK_SHARDS, value: "{{TASK_SHARDS}}"}
+            - {name: TASK_SHARD_BASE, value: "{{TASK_SHARD}}"}
+            - {name: TASK_SHARDS_BASE, value: "{{TASK_SHARDS}}"}
+            - {name: EVAL_PROCS, value: "{{EVAL_PROCS}}"}
 {{TASK_LIMIT_ENV}}
           command: ["bash", "-c"]
           args:
@@ -34,11 +35,23 @@ spec:
 {{START_VLLM}}
               mkdir -p "$WORKDIR" && cd "$WORKDIR" && ln -sfn "$CODE/mcts_utils" mcts_utils
               echo "EVAL_START $(date -Is) $TASK model=$MODEL_DIR type=$MODEL_TYPE"
-              python3 "$CODE/eval.py" --env_server_base http://127.0.0.1:36001 \
-                --model_name "$MODEL_NAME" --max_steps "$MAX_STEPS" >> "$LOG_DIR/$JOB_NAME.log" 2>&1
-              RC=$?
+              # EVAL_PROCS processes on this GPU, sharing its vLLM server, exactly as search does.
+              # eval.py stripes the test ids by (TASK_SHARD, TASK_SHARDS) and skips any id whose
+              # result file already exists, so the processes partition the work and cannot collide.
+              # Placement only: same model, same items, same scoring.
+              PIDS=()
+              for j in $(seq 0 $((EVAL_PROCS - 1))); do
+                TASK_SHARD=$(( TASK_SHARD_BASE * EVAL_PROCS + j )) \
+                TASK_SHARDS=$(( TASK_SHARDS_BASE * EVAL_PROCS )) \
+                python3 "$CODE/eval.py" --env_server_base "http://127.0.0.1:$((36001 + j % ENV_SERVERS))" \
+                  --model_name "$MODEL_NAME" --max_steps "$MAX_STEPS" \
+                  >> "$LOG_DIR/$JOB_NAME.p$j.log" 2>&1 &
+                PIDS+=($!)
+              done
+              RC=0
+              for pid in "${PIDS[@]}"; do wait "$pid" || RC=1; done
               kill "$VLLM_PID" 2>/dev/null
-              [ "$RC" -eq 0 ] || { echo "EVAL_FAILED rc=$RC; see $LOG_DIR/$JOB_NAME.log"; tail -20 "$LOG_DIR/$JOB_NAME.log"; exit 1; }
+              [ "$RC" -eq 0 ] || { echo "EVAL_FAILED rc=$RC; see $LOG_DIR/$JOB_NAME.log"; tail -20 "$LOG_DIR/$JOB_NAME".p*.log; exit 1; }
               echo "EVAL_DONE $(date -Is)"
           resources:
             limits: {nvidia.com/gpu: "1"}

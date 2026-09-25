@@ -164,6 +164,8 @@ eval:                          # eval.py
                                # rerun eval with 100 afterwards as a supplementary number.
   tag: "s100"                      # suffix for the result directory, so the same checkpoint can be evaluated
                                # under more than one protocol without collision (e.g. tag: s100).
+  procs_per_gpu: 1             # eval.py processes per GPU. 1 = the behaviour every
+                               # reported number was measured with.
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).

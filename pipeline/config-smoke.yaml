@@ -83,4 +83,6 @@ sft:
 eval:
   temp: 0
   max_steps: 5                 # SMOKE
+  procs_per_gpu: 1             # eval.py processes per GPU. 1 = the behaviour every
+                               # reported number was measured with.
   task_limit: 2                # SMOKE

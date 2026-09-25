@@ -660,6 +660,10 @@ class Pipeline:
                     "MAX_STEPS": e["max_steps"],
                     "TASK_SHARD": shard,
                     "TASK_SHARDS": shards,
+                    # eval.py runs one item at a time, so one process per GPU leaves the
+                    # card idle between environment round trips. Search already runs one
+                    # process per task; this gives eval the same treatment.
+                    "EVAL_PROCS": e.get("procs_per_gpu", 1),
                     "TASK_LIMIT_ENV": limit,
                 }
                 jobs.append((name, self.render("eval.yaml", values)))

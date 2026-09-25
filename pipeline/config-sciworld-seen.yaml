@@ -186,6 +186,8 @@ eval:                          # eval.py
                                # reported by config-sciworld.yaml.
   tag: "seen"                  # separate result directory, so the Unseen eval is not overwritten
                                # under more than one protocol without collision (e.g. tag: s100).
+  procs_per_gpu: 1             # eval.py processes per GPU. 1 = the behaviour every
+                               # reported number was measured with.
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).

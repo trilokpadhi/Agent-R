@@ -195,6 +195,8 @@ eval:                          # eval.py
                                # Run once per column, with eval.tag set to keep them apart.
   tag: "s100"                  # keeps this beside the 10-step results, not over them
                                # under more than one protocol without collision (e.g. tag: s100).
+  procs_per_gpu: 1             # eval.py processes per GPU. 1 = the behaviour every
+                               # reported number was measured with.
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).

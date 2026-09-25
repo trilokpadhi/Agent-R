@@ -195,6 +195,11 @@ eval:                          # eval.py
                                # Run once per column, with eval.tag set to keep them apart.
   tag: "unseen"                # test split = ScienceWorld (Unseen)
                                # under more than one protocol without collision (e.g. tag: s100).
+  procs_per_gpu: 4             # eval.py handles one task at a time, so a single process
+                               # per GPU leaves the card idle between environment round
+                               # trips. Search already runs one process per task; this is
+                               # the same idea for eval. Placement only - the items, the
+                               # model and the scoring are unchanged.
   task_limit: 0                # 0 = full 200-item test sets
 
 archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).

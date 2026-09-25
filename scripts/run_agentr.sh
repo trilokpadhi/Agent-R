@@ -382,14 +382,20 @@ step_eval() {
     local pids=() gpu
     # The test ids are striped over the GPUs; all shards write to one result directory and skip
     # items that already have a file, so they never collide.
+    # EVAL_PROCS processes per GPU, sharing that GPU's vLLM server - the fan-out search already
+    # uses. eval.py stripes ids by (TASK_SHARD, TASK_SHARDS) and skips any whose result file
+    # exists, so they partition the work and cannot collide. Placement only: same model, same
+    # items, same scoring.
     for ((gpu = 0; gpu < GPUS; gpu++)); do
-      ( cd "$step_dir/$task" || exit 1
-        TASK_SHARD=$gpu TASK_SHARDS=$GPUS \
-        VLLM_API_BASE="http://127.0.0.1:$(vllm_port "$gpu")/v1" \
-        "$AGENTR_POLICY_PYTHON" "$REPO/eval.py" --env_server_base "http://127.0.0.1:$(env_port "$gpu")" \
-          --model_name "$MODEL_NAME" --max_steps "$EVAL_MAX_STEPS" \
-          >> "$LOG_DIR/eval.i$it.$task.g$gpu.log" 2>&1 ) &
-      pids+=($!)
+      for ((j = 0; j < ${EVAL_PROCS:-1}; j++)); do
+        ( cd "$step_dir/$task" || exit 1
+          TASK_SHARD=$(( gpu * ${EVAL_PROCS:-1} + j )) TASK_SHARDS=$(( GPUS * ${EVAL_PROCS:-1} )) \
+          VLLM_API_BASE="http://127.0.0.1:$(vllm_port "$gpu")/v1" \
+          "$AGENTR_POLICY_PYTHON" "$REPO/eval.py" --env_server_base "http://127.0.0.1:$(env_port "$gpu")" \
+            --model_name "$MODEL_NAME" --max_steps "$EVAL_MAX_STEPS" \
+            >> "$LOG_DIR/eval.i$it.$task.g$gpu.p$j.log" 2>&1 ) &
+        pids+=($!)
+      done
     done
     local rc=0 p
     for p in "${pids[@]}"; do wait "$p" || rc=1; done
