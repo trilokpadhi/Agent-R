@@ -1,4 +1,4 @@
-# Reproducing Agent-R with Qwen3.5-9B on WebShop
+# Reproducing Agent-R with Qwen3.5-9B on WebShop, ScienceWorld and InterCode-SQL
 
 What was done, why, and every place it departs from the paper. Written so the numbers can be
 defended or re-derived by someone who was not in the room.
@@ -111,26 +111,48 @@ token length of training rows         median 2,879, mean 4,507, p90 9,991, p99 2
 
 ## 7. Results
 
-**Iteration 1, WebShop, ETO protocol, 200 test tasks, 10 steps, temperature 0:**
+All numbers are full test sets, temperature 0, best-of-three-iterations in bold. Every cell was
+recomputed from the stored per-task result files with `controller.py --step score`.
 
-| | |
-|---|---|
-| **Score** | **51.66** |
-| Completed a purchase | 154 / 200 (77%) |
-| Perfect (1.0) | 49 (24.5%) |
-| Zero | 49 (24.5%) |
-| Hit the 10-step cap | 52 (26%) |
-| Median steps | 5 |
+### Per iteration
 
-Reference points: Agent-R paper iteration 1, Llama-3.1-8B, single-task WebShop = **49.80** — at a
-100-step budget. Our earlier broken run (AgentGym, 500-token cap) = 17.08.
+| | iter 1 | iter 2 | iter 3 |
+|---|---|---|---|
+| WebShop, 10 steps (200 tasks) | **51.66** | 45.42 | 41.85 |
+| WebShop, 100 steps | 53.87 | **55.24** | 52.55 |
+| ScienceWorld Seen / dev (194) | 64.98 | **69.68** | 65.57 |
+| ScienceWorld Unseen / test (211) | 54.13 | 54.96 | **56.66** |
+| InterCode-SQL, 10 steps (200) | **56.19** | 53.02 | 54.35 |
+| InterCode-SQL, 100 steps | 63.88 | 60.95 | **65.31** |
 
-**A caveat worth stating in the paper.** Our revision trajectories place the transition point far
-earlier than the authors': 91.7% of revision rows flag the *first* action as wrong, giving a
-"revision length" of ~1.3 against their 5.7 (Figure 5). Combined with a median 7-turn good
-continuation, the learned recovery pattern consumes ≈ 10 steps — exactly the eval budget. This is
-the most likely explanation for the 26% cap rate, and it means the 10-step number understates the
-method.
+### Against the table this was run for
+
+| Method | WebShop | SciWorld Seen | SciWorld Unseen | InterCodeSQL |
+|---|---|---|---|---|
+| SFT | 54.41 | 77.98 | 72.08 | 67.82 |
+| RFT | 55.76 | 82.19 | 78.43 | 68.21 |
+| ETO | 71.16 | 84.56 | 74.20 | 68.77 |
+| Ours | 72.08 | 87.91 | 82.93 | 70.11 |
+| **Agent-R** | **55.24** | **69.68** | **56.66** | **56.19** |
+
+Agent-R is below every baseline in all four columns.
+
+### Two things a reader will ask
+
+**The step budget is not uniform, and it matters more than expected.** WebShop and InterCode-SQL are
+reported at the budget their baselines used (ETO's configs: 10 steps). ScienceWorld is reported at
+the Agent-R paper's 100 rounds, because that was the instruction; its baselines used ETO's per-task
+budgets of 10-120, so that column alone is not protocol-matched. The size of the effect on the same
+checkpoints: WebShop iteration 3 scores 52.55 at 100 steps and 41.85 at 10; InterCode iteration 1
+scores 63.88 and 56.19. Agent-R trains recovery behaviour, which costs turns, so a tight budget
+penalises it systematically.
+
+**The paper's monotonic improvement does not reproduce.** Agent-R reports WebShop 49.80 -> 56.34 ->
+60.66 across iterations. Of the six settings measured here, exactly one rises monotonically
+(ScienceWorld Unseen, +0.83 then +1.70). WebShop at 10 steps *falls at every iteration*, by 9.8
+points in total. The rest peak at iteration 1 or 2. The WebShop decline and the ScienceWorld Seen
+peak are larger than the run-to-run variation observed here; the individual gains of 1-2 points are
+not, and everything is n=1.
 
 ## 8. Cost, measured
 
@@ -162,12 +184,16 @@ on the serial code.
 
 ## 9. Open items
 
-- SciWorld: their test split addresses tasks by `(task_name, variation_idx)` with per-task step
-  budgets (30–120, weighted mean 39.7); Agent-R uses flat `data_idx` integers. Their test set has
-  **zero unseen task types**, so the Seen/Unseen columns must come from a source not in the repo.
-- Product prices are seeded but not frozen to Co-Evolving's manifest, so per-goal price caps may
+- **ScienceWorld is not protocol-matched** to its baselines (see the caveat in section 7). Fixing it
+  is one eval pass per iteration with `eval.step_budget_mode: task`, on checkpoints that have since
+  been deleted - so it now costs a retrain.
+- **Everything is n=1.** No error bars. Repeating one iteration end to end would cost about a day
+  and would settle which of the iteration-to-iteration differences are real.
+- **Product prices are seeded but not frozen** to Co-Evolving's manifest, so per-goal price caps may
   differ from theirs. One reward term out of ~5; unbiased.
-- A supplementary eval at 100 steps would separate "could not solve" from "ran out of budget".
+- **Eval is the slowest step per unit of work.** It runs one process per GPU handling ~29 tasks
+  sequentially, where search runs one process per task sharing a vLLM server. Raising eval to ~4
+  processes per GPU should cut it 3-4x (80 min -> ~20 at a 100-step budget). Placement only.
 
 ## 10. Reproducing
 
