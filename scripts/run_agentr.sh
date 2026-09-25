@@ -31,7 +31,7 @@ SITE=${AGENTR_SITE_ENV:-$REPO/scripts/site.env}
 [ -f "$SITE" ] || { echo "missing $SITE - copy scripts/site.env.example and edit it" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$SITE"
-eval "$(python3 "$REPO/scripts/config_env.py" "$CONFIG")" || exit 1
+eval "$("$AGENTR_POLICY_PYTHON" "$REPO/scripts/config_env.py" "$CONFIG")" || exit 1
 
 RUN_DIR=$RUN_ROOT/$RUN
 LOG_DIR=$RUN_DIR/logs
@@ -146,7 +146,13 @@ export_inference_env() {  # export_inference_env <task> <model_dir> <model_type>
   export HF_HOME=$AGENTR_HF_HOME HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1
   export VLLM_WORKER_MULTIPROC_METHOD=spawn
   local agentenv_var="AGENTENV_${task^^}"
-  export PYTHONPATH="$REPO:${!agentenv_var}:$AGENTR_POLICY_SITE"
+  # Built without empty fields: a trailing or doubled colon puts the CURRENT DIRECTORY on
+  # sys.path, and every step chdirs into its own work directory, so a stray file there could
+  # shadow a real module.
+  local pypath="$REPO"
+  [ -n "${!agentenv_var:-}" ] && pypath="$pypath:${!agentenv_var}"
+  [ -n "${AGENTR_POLICY_SITE:-}" ] && pypath="$pypath:$AGENTR_POLICY_SITE"
+  export PYTHONPATH="$pypath"
   # The eto clients read their prompt and split files at IMPORT time, from these roots. On the
   # Kubernetes cluster the built-in defaults (/data/src/...) happen to be correct, so nothing sets
   # them; anywhere else the policy side dies with FileNotFoundError on sciworld_inst.txt before it
@@ -158,7 +164,7 @@ export_inference_env() {  # export_inference_env <task> <model_dir> <model_type>
 }
 
 latest_checkpoint() {  # highest checkpoint-<n> under $1, by number
-  python3 - "$1" <<'EOF'
+  "$AGENTR_POLICY_PYTHON" - "$1" <<'EOF'
 import sys, pathlib
 d = pathlib.Path(sys.argv[1])
 ck = [p for p in d.glob("checkpoint-*") if p.name.split("-")[-1].isdigit()]
@@ -193,7 +199,7 @@ step_search() {
       wlo=$((lo + w * span)); whi=$((wlo + span)); [ "$whi" -gt "$hi" ] && whi=$hi
       ( cd "$step_dir" || exit 1
         VLLM_API_BASE="http://127.0.0.1:$(vllm_port "$gpu")/v1" \
-        python3 "$REPO/mcts_collection.py" \
+        "$AGENTR_POLICY_PYTHON" "$REPO/mcts_collection.py" \
           --env_server_base "http://127.0.0.1:$(env_port "$gpu")" \
           --model_name "$MODEL_NAME" --min "$wlo" --max "$whi" $extra \
           >> "$LOG_DIR/search.i$it.$task.g$gpu.w$w.log" 2>&1 ) &
@@ -254,7 +260,7 @@ step_revise() {
           [ -d "out/$t" ] && exit 0
           [ -d "done/$t/p$s" ] && exit 0
           rm -rf "partial/$t/p$s"
-          python3 "$REPO/path_collection.py" --input_dir "input/$t" --output_dir "partial/$t/p$s" \
+          "$AGENTR_POLICY_PYTHON" "$REPO/path_collection.py" --input_dir "input/$t" --output_dir "partial/$t/p$s" \
             --data_type centric --revise 1 --pair_shard "$s" --pair_shards "$PAIR_SHARDS" \
             >> "$LOG_DIR/revise.$TAG.$t.p$s.log" 2>&1 \
             && mkdir -p "partial/$t/p$s" "done/$t" && mv "partial/$t/p$s" "done/$t/p$s"' _
@@ -286,7 +292,7 @@ step_sft_data() {
   local it=$1
   local step_dir=$RUN_DIR/iter$it/sft-data
   done_file "$step_dir" && { log "iter$it sft-data: done, skipping"; echo "$step_dir/train.jsonl"; return 0; }
-  python3 "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" \
+  "$AGENTR_POLICY_PYTHON" "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" \
     --sha "$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo local)" \
     --step sft-data --iteration "$it" >/dev/null || die "sft-data failed"
   log "iter$it sft-data: $(cat "$step_dir/stats.json" | tr -d '\n ')"
@@ -350,7 +356,7 @@ step_sft() {
   # ms-swift (transformers 5.x) writes config/tokenizer files the vLLM runtime may not parse.
   # Full fine-tuning changes weights, never shapes, so the base model's files describe the
   # checkpoint exactly. Same operation the Kubernetes controller performs; idempotent.
-  python3 "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" --sha local \
+  "$AGENTR_POLICY_PYTHON" "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" --sha local \
     --step prepare-ckpt --checkpoint "$ckpt" >&2 || die "could not prepare $ckpt for serving"
   echo "$ckpt"
 }
@@ -380,7 +386,7 @@ step_eval() {
       ( cd "$step_dir/$task" || exit 1
         TASK_SHARD=$gpu TASK_SHARDS=$GPUS \
         VLLM_API_BASE="http://127.0.0.1:$(vllm_port "$gpu")/v1" \
-        python3 "$REPO/eval.py" --env_server_base "http://127.0.0.1:$(env_port "$gpu")" \
+        "$AGENTR_POLICY_PYTHON" "$REPO/eval.py" --env_server_base "http://127.0.0.1:$(env_port "$gpu")" \
           --model_name "$MODEL_NAME" --max_steps "$EVAL_MAX_STEPS" \
           >> "$LOG_DIR/eval.i$it.$task.g$gpu.log" 2>&1 ) &
       pids+=($!)
@@ -391,7 +397,7 @@ step_eval() {
     [ "$rc" -eq 0 ] || die "eval $task: see $LOG_DIR/eval.i$it.$task.*.log"
   done
   local summary
-  summary=$(python3 "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" --sha local \
+  summary=$("$AGENTR_POLICY_PYTHON" "$REPO/pipeline/controller.py" --config "$CONFIG" --code-dir "$REPO" --sha local \
               --step score --iteration "$it") || die "scoring failed"
   mark_done "$step_dir" "$summary"
   log "iter$it eval: $(echo "$summary" | tr -d '\n ')"
