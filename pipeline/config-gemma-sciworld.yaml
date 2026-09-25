@@ -1,0 +1,213 @@
+# Agent-R with Gemma-3-12B on WebShop, Co-Evolving (ETO) environment, 3 iterations.
+# Identical protocol to the Qwen3.5-9B run (pipeline/config.yaml); only the model and the
+# three settings Gemma-3 forces differ, each marked GEMMA below.
+# Every setting the pipeline uses lives here. Each value names its source.
+# Each launch records its commit and this file in /data/runs/<run>/run.json; every step's .done names its commit.
+
+run: gemsci                    # Gemma-3-12B on ScienceWorld, Co-Evolving (ETO), on DeltaAI
+                               # q35ws (500-token cap) is kept for comparison: iter-1 eval 14.6 with 80/104 tasks looping
+tasks: [sciworld]
+
+# WebShop environment protocol. 'eto' = the Co-Evolving / ETO environment the user's Table 3 was
+# produced on: full 1,181,430-product catalogue, 12,087 human goals, ETO's train/test id lists, one
+# in-context example, and Co-Evolving's step() semantics. 'agentgym' = Agent-R's released setup
+# (1,000-product subset, its own 200-item split) - the two test sets overlap by 3 of 200, so a
+# number collected on agentgym cannot be compared with that table. See webshop_eto/.
+webshop_protocol: eto
+
+# SciWorld environment protocol. 'eto' = the Co-Evolving environment the table was produced on:
+# simplificationStr="easy", reward = raw_score (0-1) kept as the episode MAXIMUM, their
+# (task_name, variation_idx) splits, per-task step budgets from max_steps.json (10-120).
+# 'agentgym' = the Agent-R maintainers' files: no simplification, reward 0-100, flat data_idx.
+# The 0-1 scale also matters for alpha: path_collection.py compares RAW values, so on a 0-100
+# scale alpha 0.5/0.7/1.0 admits everything and the filter is inert. See sciworld_eto/.
+sciworld_protocol: eto
+namespace: ii400r87
+pvc: tpadhi1
+gpus: 4                        # DeltaAI ghx4: 4 x GH200 per node. global_batch stays 112,
+                               # so gradient accumulation becomes 28 and the effective batch
+                               # is identical to the 7-GPU ARCTIC runs.
+iterations: 3                  # paper: "we conduct Agent-R for three iterations"
+seed: 42
+run_root: /work/nvme/biqx/tpadhi/agentr/runs           # outputs: /data/runs/<run>/iter<N>/<step>
+
+images:                        # pinned by digest; verified on this cluster (Sep 14)
+  vllm: vllm/vllm-openai:qwen3_5@sha256:4df38f8d5ea7c286b6ad6725361c0e1d159ad36b6a2f951bc5e00467cfc4e9ae
+  sft: modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope@sha256:cb8aadb783de32cd9df894b0d44b96161b31bed78d1eeafd59e9563a518743c3  # ms-swift 4.5.3, transformers 5.16.1
+  env_server: condaforge/miniforge3:24.3.0-0
+  controller: alpine/k8s@sha256:5efac3ed9955c8747296d520539cded681f4ef5dbb73fb591141df282b61cc35  # 1.32.13, matches the cluster
+  rclone: rclone/rclone:1.71.0   # same version as the Mac that authorises Dropbox, so the conf format matches
+
+node_selector_key: nvidia.com/gpu.product
+node_selector_value: NVIDIA-H100-80GB-HBM3
+
+model:
+  name: gemma-3-12b-it-text
+  # GEMMA: the text tower extracted from google/gemma-3-12b-it, NOT the published checkpoint.
+  # The original is Gemma3ForConditionalGeneration (vision tower + language model); vLLM serving
+  # and ms-swift training both want a plain causal LM. k8s/setup/gemma3-download-extract.yaml
+  # produces this and asserts model_type gemma3_text with no vision_config.
+  base_dir: /work/nvme/biqx/tpadhi/agentr/models/gemma-3-12b-it-text
+
+environments:                  # prebuilt on the PVC; SciWorld uses the maintainers' AgentGym files (issues #5, #8)
+  webshop:
+    agentenv: /data/src/AgentGym/agentenv
+    # The in-context example used by the eto protocol. It stays in the prompt at collection and
+    # eval; step_sft_data removes it from training rows, because ETO's own SFT data has only
+    # instruction + "OK" before the task (verified against data/webshop_sft.json: 2 identical
+    # leading turns across 1,824 rows).
+    icl_path: /data/src/webshop-eto/eval_agent/prompt/icl_examples/webshop_icl.json
+  sciworld:
+    agentenv: /data/src/AgentGym-agentr/agentenv
+    # Under sciworld_protocol: eto the prompt carries instruction + "OK" + one 14-turn worked
+    # example. step_sft_data removes those 14 turns from TRAINING rows (they stay in the
+    # prompt at collection and eval), so a fixed demonstration is not a target in every row.
+    icl_path: /work/nvme/biqx/tpadhi/agentr/sciworld-eto/eval_agent/prompt/icl_examples/sciworld_icl.json
+
+inference:                     # shared by search and revision (eval overrides temp below)
+  temp: 1                      # paper: expansion temperature 1; also the code's default TEMP (llm_server.py)
+  max_new_tokens: 4096         # runaway guard, NOT the authors' 500. Their 500 cut >10% of Qwen3.5
+                               # replies before 'Action:' and produced the 17.08 run. Unbounded is also
+                               # unsafe: a degenerate repetition loop generated 20,000+ tokens in one
+                               # reply and hung eval shard 4 of q35fast until the client's 600s timeout,
+                               # failing the job after 2.5h. Measured over 1,875 real eval replies:
+                               # median 34 tokens, p99 692, max 2,332 - so 4096 truncates 0.000% of
+                               # legitimate replies and stops a runaway in ~30s.
+  max_token_length: 8192       # maintainer, issue #8
+  enable_thinking:             # GEMMA: empty. enable_thinking is a Qwen chat-template
+                               # variable; Gemma's template has none, so it must not be sent.
+  vllm_dtype: bfloat16
+  env_servers: 1               # MEASURED: 2 servers per GPU ran 1.13x SLOWER (bench-b 62m08s vs
+                               # bench-a 55m05s) - the environment server was never the bottleneck.
+                               # Must match the sidecar, which serves ports 36001..36001+N-1.# environment server PROCESSES per GPU, ports 36001..; each search worker is
+                               # pinned to one (worker % env_servers). Agent-R replays the episode from step 1
+                               # on every generation (~11 env calls per model call), and one single-threaded
+                               # server doing two BeautifulSoup parses per call was the search bottleneck: the
+                               # GPU sat at 2% KV cache. Separate processes, not uvicorn --workers, because the
+                               # env is stateful per client. Prices are identical across processes (seeded
+                               # before construction). Under the eto protocol each process holds the full
+                               # catalogue, so RAM scales with N: measure one process before raising this.
+  env_memory_limit: 48Gi       # measured: one full-catalogue env server is 15.3 GiB RSS / 19.1 GiB peak,
+                               # ready in 158s. Two fit with headroom; re-measure before raising env_servers.
+  mcts_profile: false          # MCTS_PROFILE=1: per-task timing of prompt_build / llm / deepcopy /
+                               # env_replay / env_step, printed to the worker log. Inert when false.
+  mcts_batch_gen: false        # MEASURED HARMFUL, do not enable. At full scale it saved only 9% of search
+                               # (2h23m -> 2h11m) and cost 2.2 points: q35fast iteration 1 scored 49.43
+                               # against 51.66 for the identical pipeline without it. bench-c agreed
+                               # independently (24.5% perfect leaf paths vs 28.7%). vLLM's n=4 shares one
+                               # prefill, so the four candidates correlate and MCTS explores less.
+                               # Kept in the code, off by default. pair_shards is the safe speedup.# expand(): one vLLM request with n=N_GEN samples instead of N_GEN requests.
+                               # Same prompt, same temperature -> same distribution; shares the prefill.
+                               # false = the released loop. The authors left this exact idea commented out
+                               # in expand() (`self._generate(node, n_generate_samples)`).
+  # vLLM max model length is not set: vLLM uses the model's own context length. It only caps a single
+  # request and does not change results; path_collection.py truncates by words, so prompts can exceed 8192 tokens.
+  # Processes per GPU are not a setting: one mcts_collection.py per task id and one path_collection.py per tree,
+  # all sharing that GPU's vLLM server. Speed only; results do not depend on it.
+
+search:                        # mcts_collection.py, released code as-is: same tasks every iteration
+  max_depth: 20                # paper
+  itera: 8                     # paper / maintainer issue #3
+  n_gen: 4                     # paper
+  webshop_tasks: 300           # paper: 300 WebShop simulations; ids from the code's range(1000)
+  sciworld_tasks: 200          # paper: 200 SciWorld simulations. Under sciworld_protocol: eto these are
+                               # the first 200 positions of Co-Evolving's 1,483-item train split.
+  sciworld_task_iteration: 9   # agentgym protocol only: 23 tasks x 9 variations ~= 200
+  seed_trees: {}               # none: the earlier trees were collected with the 500-token cap
+
+revise:                        # path_collection.py --data_type centric --revise 1 (README)
+  alpha: [0.5, 0.7, 0.999]     # paper says 0.5 / 0.7 / 1.0, applied to raw scores as the code does.
+                               # 1.0 is unusable on WebShop: path_collection.py skips a path when
+                               # `high_path[-1].value <= ALPHA`, and WebShop reward is capped at 1.0, so
+                               # alpha=1.0 excludes even perfect trajectories - iteration 3 produced 0 rows.
+                               # Measured over 3,535 terminal leaves of the iteration-3 trees: max value
+                               # 1.000, zero leaves above 1.0, but 1,476 leaves at exactly env_score 1.0.
+                               # Paper Eq. 4 requires alpha < r(tau^g) <= 1, which is empty at alpha=1.
+                               # 0.999 selects exactly the reward-1.0 (optimal) paths, which is the stated
+                               # intent: "By iteration 3, the good trajectories converge toward optimal".
+  beta: 0.2                    # paper
+  pair_shards: 8               # SPEED ONLY, not a method change. The released path_collection.py walks a
+                               # tree's pairs one at a time; one tree with 5,480 pairs held a GPU for 30h.
+                               # Each tree now runs as 8 processes, each taking every 8th pair, with the
+                               # revision sentences pre-drawn in serial order - same pairs, same model
+                               # calls, same rows (see path_collection.py main). 1 = released behaviour.
+  concurrency: 96              # (tree, shard) units in flight per GPU. vLLM batches them; measured
+                               # KV-cache use at 43 in flight was 1.5-2.3%, so there is ample headroom.
+
+sft_data:
+  # Maintainer (issue #8): each iteration trains on revise_log + high_log entries; paper Table 1 sizes.
+  # Rows above a cap are sampled down with the run seed; rows below it are all used.
+  caps:
+    webshop: {revise: 5500, good: 600}
+    sciworld: {revise: 8000, good: 2500}
+  general_path: /work/nvme/biqx/tpadhi/agentr/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json  # ShareGPT_Vicuna_unfiltered
+  general_fraction: 0.25       # maintainer: (revision + good) : general = 8 : 2
+
+sft:                           # paper appendix C.1 (Llama-3.1-8B), mapped to ms-swift
+  epochs: [3, 1, 1]            # paper
+  continue_from_previous: true # user decision: iterations 2-3 fine-tune the previous checkpoint
+  max_length: 8192             # GEMMA: 12B, not 9B. Qwen at 12288 already peaked at 76 of
+                               # 80 GiB, so the same length cannot fit. Raise only after a
+                               # smoke run reports the real peak.
+                               # 16384 OOMed twice on 7xH100 during backward (64.3 GiB allocated, a 12.66 GiB
+                               # allocation failed) once a max-length row reached the backward pass.
+                               # Real token stats over train.jsonl: median 2,879, mean 4,507, p90 9,991.
+  truncation_strategy: delete  # DROP rows over max_length rather than cut their tail. Truncation removes
+                               # the recovery and the Buy Now - the exact defect that produced 17.08 - while
+                               # 'delete' only removes about 5% of candidates from a pool of 141,548 we
+                               # sample 5,500 from, so every surviving example stays complete.
+  learning_rate: 2.0e-5        # paper C.1
+  warmup_ratio: 0.03           # paper C.1: 3% warm-up, cosine scheduler
+  weight_decay: 0              # paper C.1: AdamW, weight decay 0
+  max_grad_norm: 1             # paper C.1
+  adam_beta1: 0.9              # XTuner
+  adam_beta2: 0.999            # XTuner
+  dtype: bfloat16              # user decision (XTuner uses fp16)
+  global_batch: 112            # paper C.1: batch 1 per device x accumulation 16, on our 7 GPUs (paper: 8 A100-80GB)
+  per_device_batch: 1          # paper C.1
+  deepspeed: zero2             # Agent-R README: --deepspeed deepspeed_zero2.
+                               # zero3 was tried and reverted: it fixed the OOM (42.6 GiB peak) but ran at
+                               # 169 s/step vs 49 s/step previously - 10h for 219 steps - because it
+                               # re-gathers the sharded parameters every layer and NVLink SHARP is off.
+                               # zero2 is viable now that max_length is 16384 (not 20480) and the allocator
+                               # uses expandable segments, which recovered the 12.7 GiB lost to fragmentation.
+  packing: false               # required: Qwen3.5 linear attention does not support packing
+  attn_impl: eager            # GEMMA: flash-attn fails on Gemma-3's interleaved sliding-window
+                              # attention (Co-Evolving README, Troubleshooting).
+                              # attention breaks with flash-attn on some transformers
+                              # builds (Co-Evolving README, Troubleshooting).
+  loss_scale: default          # all assistant turns get loss, as in the released code (user decision)
+
+eval:                          # eval.py
+  temp: 0                      # paper C.1: "Following the settings in AgentGym, the evaluation temperature is set to 0"
+  max_steps: 100               # user decision: report ScienceWorld at the Agent-R paper's
+                               # 100 rounds (p.9), as the Qwen ScienceWorld run did.
+                               # NOTE this is a real handicap for Agent-R: a revision trajectory is
+                               # bad prefix + revision + recovery (27 turns in our data), and the
+                               # paper evaluates at 100 rounds. Reported at 10 for comparability;
+                               # rerun eval with 100 afterwards as a supplementary number.
+  step_budget_mode: fixed      # fixed  = the paper's flat 100 rounds (what we report for Agent-R)
+                               # task   = Co-Evolving's PER-TASK budget from max_steps.json (10-120),
+                               #          which is what their own baselines were measured under.
+                               # Not interchangeable: run each with its own eval.tag and say which.
+  sciworld_split: test         # Unseen. The Seen column is config-gemma-sciworld-seen.yaml.
+                               # (task, variation) pairs with train; test = (Unseen), sharing none.
+                               # Run once per column, with eval.tag set to keep them apart.
+  tag: "unseen"                # test split = ScienceWorld (Unseen)
+                               # under more than one protocol without collision (e.g. tag: s100).
+  task_limit: 0                # 0 = full 200-item test sets
+
+archive:                       # after each iteration's eval, upload its artifacts to Dropbox (rclone copy).
+  enabled: false                # NON-FATAL: a failed upload is logged and training continues.
+  remote: "dropbox:agent-r"    # rclone remote named 'dropbox' + the folder you created (dropbox.com/home/agent-r)
+  secret: rclone-dropbox       # Kubernetes Secret holding rclone.conf, created from YOUR terminal - never via chat.
+                               # Export ONLY the dropbox remote, not your whole rclone config:
+                               #   rclone config show dropbox > /tmp/rclone-dropbox.conf
+                               #   kubectl create secret generic rclone-dropbox -n ii400r87 --from-file=rclone.conf=/tmp/rclone-dropbox.conf
+                               #   rm /tmp/rclone-dropbox.conf
+                               # If the Secret is absent the archive step is skipped with a log line, never a stall.
+  trees: true                  # also upload search-* MCTS trees (~5-7 GiB per iteration)
+  revise: true                 # also upload revise-* rows   (~10-25 GiB per iteration)
+                               # Always uploaded: eval results, sft-data (train.jsonl), the SFT checkpoint
+                               # (~18 GiB), run.json and logs. A free Dropbox is 2 GB: the checkpoint
+                               # alone needs a paid plan.

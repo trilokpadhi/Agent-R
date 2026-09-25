@@ -70,6 +70,7 @@ def main(path):
                 "per_device_batch", "deepspeed", "loss_scale"):
         emit(f"SFT_{key.upper()}", sft[key])
     emit("SFT_PACKING", str(sft["packing"]).lower())
+    emit("SFT_ATTN_IMPL", sft.get("attn_impl", "flash_attn"))
 
     if sft["global_batch"] % (c["gpus"] * sft["per_device_batch"]):
         sys.exit("config error: sft.global_batch must be divisible by gpus x per_device_batch")

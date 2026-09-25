@@ -30,7 +30,10 @@ CONFIGS = [
     ("pipeline/config-sciworld.yaml", "SciWorld, 100 rounds"),
     ("pipeline/config-intercode.yaml", "InterCode-SQL, 10-step eval"),
     ("pipeline/config-intercode-eval100.yaml", "InterCode-SQL, 100-step eval"),
-    ("pipeline/config-gemma-webshop.yaml", "Gemma WebShop"),
+    ("pipeline/config-gemma-webshop.yaml", "Gemma WebShop, 10-step"),
+    ("pipeline/config-gemma-webshop-eval100.yaml", "Gemma WebShop, 100-step"),
+    ("pipeline/config-gemma-sciworld.yaml", "Gemma SciWorld Unseen, 100 rounds"),
+    ("pipeline/config-gemma-sciworld-seen.yaml", "Gemma SciWorld Seen, 100 rounds"),
 ]
 
 # Settings that change the experiment. Placement (WORKERS, ENV_SERVERS, CODE, WORKDIR, JOB_NAME,
@@ -73,6 +76,65 @@ def shell_vars(path):
             if re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
                 exported.add(name)
     return exported
+
+
+def sft_values(config_path):
+    """Flag -> value for `swift sft`, on BOTH backends, with values actually resolved.
+
+    Comparing flag NAMES is not enough: run_agentr.sh once hardcoded `--attn_impl flash_attn`
+    while the controller read it from the config, so the same config trained differently on the
+    two machines and the name-only check passed. Gemma needs `eager` and DeltaAI has no
+    flash-attn installed at all, so that difference is fatal rather than cosmetic.
+    """
+    cfg = C.load_config(ROOT / config_path)
+    sft, gpus = cfg["sft"], cfg["gpus"]
+    accum = sft["global_batch"] // (gpus * sft["per_device_batch"])
+
+    # Kubernetes: render the template with the values the controller would pass.
+    values = {
+        "GPUS": gpus, "MODEL_DIR": "/model", "DATA_PATH": "/data.jsonl", "OUTPUT_DIR": "/out",
+        "EPOCHS": sft["epochs"][0], "DTYPE": sft["dtype"], "MAX_LENGTH": sft["max_length"],
+        "TRUNCATION": sft["truncation_strategy"], "PACKING": str(sft["packing"]).lower(),
+        "LOSS_SCALE": sft["loss_scale"], "PER_DEVICE_BATCH": sft["per_device_batch"],
+        "GRAD_ACCUM": accum, "LR": sft["learning_rate"], "WARMUP": sft["warmup_ratio"],
+        "WEIGHT_DECAY": sft["weight_decay"], "MAX_GRAD_NORM": sft["max_grad_norm"],
+        "ADAM_BETA1": sft["adam_beta1"], "ADAM_BETA2": sft["adam_beta2"],
+        "DEEPSPEED": sft["deepspeed"], "SEED": cfg["seed"],
+        "ATTN_IMPL": sft.get("attn_impl", "flash_attn"),
+    }
+    rendered = (ROOT / "pipeline/templates/sft.yaml").read_text()
+    for k, v in values.items():
+        rendered = rendered.replace("{{" + k + "}}", str(v))
+    k_cmd = command_block(rendered, "swift sft")
+
+    # Slurm: take its command and substitute the shell variables config_env.py provides.
+    env = subprocess.run([sys.executable, str(ROOT / "scripts/config_env.py"), str(ROOT / config_path)],
+                         capture_output=True, text=True).stdout
+    shell = dict(re.findall(r"^([A-Z_][A-Z0-9_]*)='?([^'\n]*)'?$", env, re.M))
+    shell["epochs"] = str(sft["epochs"][0])          # a loop variable, not from config_env
+    s_cmd = command_block((ROOT / "scripts/run_agentr.sh").read_text(), '"$AGENTR_SWIFT" sft')
+    for name, val in sorted(shell.items(), key=lambda kv: -len(kv[0])):
+        s_cmd = s_cmd.replace(f'"${{{name}}}"', val).replace(f"${{{name}}}", val)
+        s_cmd = s_cmd.replace(f'"${name}"', val).replace(f"${name}", val)
+
+    def pairs(cmd):
+        return dict(re.findall(r"--([a-zA-Z0-9_]+)\s+(\S+)", cmd))
+    return pairs(k_cmd), pairs(s_cmd)
+
+
+def check_sft_values(config_path, label):
+    kv, sv = sft_values(config_path)
+    # Only compare flags whose value comes from the config; paths and dirs legitimately differ.
+    skip = {"model", "dataset", "output_dir"}
+    bad = [(f, kv[f], sv.get(f)) for f in kv
+           if f not in skip and not sv.get(f, "").startswith("/") and kv[f] != sv.get(f)]
+    if bad:
+        print(f"  FAIL {label}")
+        for f, a, b in bad:
+            print(f"         --{f}: kubernetes={a!r} slurm={b!r}")
+        return 1
+    print(f"  ok   {label:30s} {len(kv)} sft values match (attn_impl={kv.get('attn_impl')})")
+    return 0
 
 
 def check_commands():
@@ -169,6 +231,11 @@ def check_env(config_path, label):
 if __name__ == "__main__":
     print("command flags (kubernetes vs slurm):")
     failures = check_commands()
+    print("\nswift sft VALUES (not just flag names):")
+    for path, label in CONFIGS:
+        if (ROOT / path).exists():
+            failures += check_sft_values(path, label)
+
     print("\nsettings and shards, per config:")
     for path, label in CONFIGS:
         if (ROOT / path).exists():

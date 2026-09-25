@@ -331,7 +331,7 @@ step_sft() {
     --adam_beta2 "$SFT_ADAM_BETA2" \
     --deepspeed "$SFT_DEEPSPEED" \
     --gradient_checkpointing true \
-    --attn_impl flash_attn \
+    --attn_impl "$SFT_ATTN_IMPL" \
     --split_dataset_ratio 0 \
     --save_strategy epoch \
     --save_only_model true \
